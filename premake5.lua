@@ -880,6 +880,7 @@ project "ddb_gui_GTK2"
     "plugins/gtkui/widgets/*.c",
     "shared/eqpreset.c",
     "shared/trkproperties_shared.c",
+    "shared/musicbrainz.c",
     "shared/analyzer/analyzer.c",
     "shared/scope/scope.c",
     "src/utf8.c"
@@ -913,6 +914,7 @@ project "ddb_gui_GTK3"
     "plugins/gtkui/widgets/*.c",
     "shared/eqpreset.c",
     "shared/trkproperties_shared.c",
+    "shared/musicbrainz.c",
     "shared/analyzer/analyzer.c",
     "shared/scope/scope.c",
     "src/utf8.c"

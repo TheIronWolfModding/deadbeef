@@ -266,10 +266,13 @@ AS_IF([test "${enable_gtk2}" = "yes" -o "${enable_gtk3}" = "yes" -o "${enable_sh
         JANSSON_LIBS=-ljansson
         AC_SUBST(JANSSON_CFLAGS)
         AC_SUBST(JANSSON_LIBS)
+        HAVE_JANSSON=yes
     ], [
         PKG_CHECK_MODULES(JANSSON, jansson)
+        HAVE_JANSSON=yes
     ])
 ])
+AM_CONDITIONAL(HAVE_JANSSON, [test "x$HAVE_JANSSON" = "xyes"])
 
 AS_IF([test "${enable_staticlink}" != "no"], [], [
     AC_CHECK_LIB([dispatch], [main], [HAVE_DISPATCH=yes])

@@ -2,6 +2,10 @@ SUBDIRS = analyzer scope scriptable undo filereader
 
 noinst_LTLIBRARIES = libmp4tagutil.la libtrkpropertiesutil.la libeqpreset.la libctmap.la libdeletefromdisk.la libtftintutil.la libgrowablebuffer.la libpluginsettings.la libparser.la
 
+if HAVE_JANSSON
+noinst_LTLIBRARIES += libmusicbrainz.la
+endif
+
 libmp4tagutil_la_SOURCES = mp4tagutil.h mp4tagutil.c
 libmp4tagutil_la_CFLAGS = -fPIC -std=c99 -I@top_srcdir@/external/mp4p/include -I@top_srcdir@/include
 
@@ -29,3 +33,6 @@ libpluginsettings_la_CFLAGS = -fPIC -std=c99 -I@top_srcdir@/include
 
 libparser_la_SOURCES = parser.h parser.c
 libparser_la_CFLAGS = -fPIC -std=c99 -I@top_srcdir@/include
+
+libmusicbrainz_la_SOURCES = musicbrainz.h musicbrainz.c
+libmusicbrainz_la_CFLAGS = -fPIC -std=c99 -I@top_srcdir@/include $(JANSSON_CFLAGS)

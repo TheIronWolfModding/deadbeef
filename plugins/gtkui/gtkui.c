@@ -54,6 +54,7 @@
 #include "gtkui_api.h"
 #include "hotkeys.h"
 #include "interface.h"
+#include "mbtagger.h"
 #include "medialib/medialibmanager.h"
 #include "medialib/medialibwidget.h"
 #include "playlist/plcommon.h"
@@ -2246,7 +2247,8 @@ static DB_plugin_action_t action_edit_redo = {
 
 static DB_plugin_action_t *
 gtkui_get_actions (DB_playItem_t *it) {
-    return &action_edit_redo;
+    mbtagger_link_actions (&action_edit_redo);
+    return mbtagger_get_actions (it);
 }
 
 #if !GTK_CHECK_VERSION(3, 0, 0)

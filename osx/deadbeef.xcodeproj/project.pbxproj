@@ -1768,6 +1768,8 @@
 		2D92D33E29B9324A00218F1D /* pluginsettings.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D21729B92DF900218F1D /* pluginsettings.c */; };
 		2D92D4A02F1A000100AAAAAA /* analyzer.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D21C29B92DF900218F1D /* analyzer.c */; };
 		2D92D4A02F1A000200AAAAAA /* AnalyzerTests.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D4A02F1A000300AAAAAA /* AnalyzerTests.cpp */; };
+		2D92D5A22F1A001000AAAA02 /* musicbrainz.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D5A12F1A001000AAAA01 /* musicbrainz.c */; };
+		2D92D5A52F1A001000AAAA05 /* MusicBrainzTests.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D5A42F1A001000AAAA04 /* MusicBrainzTests.cpp */; };
 		2D92F37C2B6D226F00BD07E8 /* UndoIntegration.h in Headers */ = {isa = PBXBuildFile; fileRef = 2D92F37A2B6D226F00BD07E8 /* UndoIntegration.h */; };
 		2D92F37D2B6D226F00BD07E8 /* UndoIntegration.m in Sources */ = {isa = PBXBuildFile; fileRef = 2D92F37B2B6D226F00BD07E8 /* UndoIntegration.m */; };
 		2D92F3822B6D250D00BD07E8 /* undointegration.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92F37F2B6D23FF00BD07E8 /* undointegration.c */; };
@@ -6591,6 +6593,9 @@
 		2D92D21D29B92DF900218F1D /* growableBuffer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = growableBuffer.h; sourceTree = "<group>"; };
 		2D92D21E29B92DF900218F1D /* ctmap.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ctmap.c; sourceTree = "<group>"; };
 		2D92D4A02F1A000300AAAAAA /* AnalyzerTests.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = AnalyzerTests.cpp; sourceTree = "<group>"; };
+		2D92D5A12F1A001000AAAA01 /* musicbrainz.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = musicbrainz.c; sourceTree = "<group>"; };
+		2D92D5A32F1A001000AAAA03 /* musicbrainz.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = musicbrainz.h; sourceTree = "<group>"; };
+		2D92D5A42F1A001000AAAA04 /* MusicBrainzTests.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = MusicBrainzTests.cpp; sourceTree = "<group>"; };
 		2D92F37A2B6D226F00BD07E8 /* UndoIntegration.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = UndoIntegration.h; sourceTree = "<group>"; };
 		2D92F37B2B6D226F00BD07E8 /* UndoIntegration.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = UndoIntegration.m; sourceTree = "<group>"; };
 		2D92F37E2B6D23FE00BD07E8 /* undointegration.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = undointegration.h; sourceTree = "<group>"; };
@@ -11555,6 +11560,8 @@
 				2D92D21D29B92DF900218F1D /* growableBuffer.h */,
 				2D92D1FE29B92DF900218F1D /* mp4tagutil.c */,
 				2D92D1EE29B92DF900218F1D /* mp4tagutil.h */,
+				2D92D5A12F1A001000AAAA01 /* musicbrainz.c */,
+				2D92D5A32F1A001000AAAA03 /* musicbrainz.h */,
 				2D92D21729B92DF900218F1D /* pluginsettings.c */,
 				2D92D1FA29B92DF900218F1D /* pluginsettings.h */,
 				2D92D1F329B92DF900218F1D /* tftintutil.c */,
@@ -12208,6 +12215,7 @@
 				2D0214072DA12CA300BAEA12 /* MetacacheTests.cpp */,
 				4D6CF18C20EB788A00811034 /* MP3DecoderTests.cpp */,
 				4D6CF17D20EB783900811034 /* MP3ParserTests.cpp */,
+				2D92D5A42F1A001000AAAA04 /* MusicBrainzTests.cpp */,
 				4DC416FD2180919D0056133E /* PlaylistTests.cpp */,
 				4D31BECD1E9FB194001D1B89 /* ResamplerTests.cpp */,
 				2D92D4A02F1A000300AAAAAA /* AnalyzerTests.cpp */,
@@ -18997,6 +19005,8 @@
 				2DEE302B29BC8D1900A293AD /* coreaudio.c in Sources */,
 				2D15721623785BD900985E47 /* VfsCurlTests.cpp in Sources */,
 				4D6CF18B20EB783900811034 /* MP3ParserTests.cpp in Sources */,
+				2D92D5A22F1A001000AAAA02 /* musicbrainz.c in Sources */,
+				2D92D5A52F1A001000AAAA05 /* MusicBrainzTests.cpp in Sources */,
 				2D78C5682756990B00F96F9D /* medialibfilesystem_stub.c in Sources */,
 				2DFF258630952A10004C03E7 /* layoutmanager.c in Sources */,
 				2DFF256D30952990004C03E7 /* GtkLayoutManagerTests.cpp in Sources */,

@@ -19,6 +19,7 @@ plugins/gtkui/gtkui.c
 plugins/gtkui/gtkui_deletefromdisk.c
 plugins/gtkui/interface.c
 plugins/gtkui/layoutmenu.c
+plugins/gtkui/mbtagger.c
 plugins/gtkui/medialib/medialibwidget.c
 plugins/gtkui/playlist/mainplaylist.c
 plugins/gtkui/playlist/plcommon.c
