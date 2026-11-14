@@ -129,6 +129,38 @@ mb_lookup_mbid (const char *entity, const char *mbid, int numtracks, const volat
 void
 mb_result_free (mb_result_t *result);
 
+/// A single image the Cover Art Archive has for a release.
+typedef struct mb_cover_s {
+    char *types;     // "Front, Booklet", joined for display
+    char *comment;   // free text, may be NULL
+    char *thumbnail; // 500 px image, for previews
+    char *image;     // the original image, for saving
+    int front;
+    int approved;
+} mb_cover_t;
+
+/// The images the Cover Art Archive has for a release, with the art of the
+/// release group as a fallback when the release itself has none.
+typedef struct mb_cover_list_s {
+    mb_cover_t *covers;
+    int num_covers; // 0 means there is no cover art, which is not an error
+    int failed;     // the request failed, so "no covers" is not conclusive
+} mb_cover_list_t;
+
+/// Looks up the cover art of a release, or of its release group when the
+/// release has none of its own. Blocking, call from a worker thread. Returns
+/// an empty list when there is no art, and NULL only when out of memory.
+mb_cover_list_t *
+mb_cover_fetch (const char *release_id, const char *release_group_id, const volatile int *abort);
+
+void
+mb_cover_list_free (mb_cover_list_t *list);
+
+/// Downloads an image into a malloc()ed buffer. Returns 1 on success, and the
+/// caller must free() the data. The url must be null terminated.
+int
+mb_cover_download (const char *url, void **data, size_t *size, const volatile int *abort);
+
 /// Writes the tags of the release into the metadata of the items, in the order
 /// they were selected. discnumber selects the disc of a multi-disc release to
 /// apply, and must have exactly as many tracks as the selection; pass 0 to

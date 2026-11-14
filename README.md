@@ -87,8 +87,9 @@ pacman -S mingw-w64-x86_64-jansson mingw-w64-x86_64-gtk3 mingw-w64-x86_64-gtk2 m
 
 ## Notes
 
-Parts of this fork, including the MusicBrainz tagger and the lyrics plugin,
-were written with the help of various LLMs. They follow the ideas of
+Parts of this fork, including the MusicBrainz tagger, the cover art download
+and the lyrics plugin, were written with the help of various LLMs. They follow
+the ideas of
 [foo_musicbrainz](https://github.com/kbuffington/foo_musicbrainz) (MIT,
 Kirill Korolyov, marc2003) and
 [foo_openlyrics](https://github.com/jacquesh/foo_openlyrics) (MIT, Jacques
