@@ -95,6 +95,7 @@ static void _job_free (mb_job_t *job);
 static void _show_release_picker (mb_job_t *job);
 static gboolean _query_finished_cb (gpointer ctx);
 static gboolean _write_tags_finished_cb (gpointer ctx);
+static gboolean _cover_finished_cb (gpointer ctx);
 
 #pragma mark - helpers
 
@@ -488,6 +489,386 @@ _write_tags (mb_job_t *job) {
         _job_free (job);
         _show_error (_("Failed to write the tags."));
     }
+}
+
+#pragma mark - fetching cover art
+
+// one folder of the selection, with the metadata needed to find its art
+typedef struct {
+    char *dir;
+    char *mbid; // musicbrainz_albumid, may be NULL
+    char *release_group_id; // musicbrainz_releasegroupid, may be NULL
+    char *artist;
+    char *album;
+    int numtracks;
+} mb_cover_album_t;
+
+typedef struct {
+    mb_cover_album_t *albums;
+    int numalbums;
+    volatile int abort;
+    volatile int current;
+
+    int saved;
+    int skipped; // a cover file was already there
+    int notfound;
+    int failed;
+
+    mb_progress_t progress;
+    guint poll_source;
+    intptr_t tid;
+} mb_cover_task_t;
+
+// only one cover art download at a time, so that two of them don't write the
+// same file at once
+static mb_cover_task_t *_cover_task;
+
+static void
+_show_info (const char *message) {
+    GtkWidget *dlg = gtk_message_dialog_new (mainwin ? GTK_WINDOW (mainwin) : NULL,
+            GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT, GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "%s", message);
+    gtk_dialog_run (GTK_DIALOG (dlg));
+    gtk_widget_destroy (dlg);
+}
+
+// the cover art is always saved the way the artwork plugin looks for it, so
+// that the rest of the player picks it up without rescanning anything
+static char *
+_cover_target_path (const char *dir, const char *image_url) {
+    char name[256];
+    deadbeef->conf_get_str ("musicbrainz.cover_filename", "cover.jpg", name, sizeof (name));
+    if (!name[0]) {
+        snprintf (name, sizeof (name), "cover.jpg");
+    }
+
+    // the extension decides how the rest of the player decodes the file, so it
+    // is taken from the image rather than from the configured name
+    char ext[16] = ".jpg";
+    if (image_url) {
+        const char *query = strchr (image_url, '?');
+        const char *slash = strrchr (image_url, '/');
+        const char *dot = slash ? strrchr (slash, '.') : NULL;
+        if (dot && (!query || dot < query) && strlen (dot) < sizeof (ext)) {
+            snprintf (ext, sizeof (ext), "%s", dot);
+        }
+    }
+
+    char *base = g_strdup (name);
+    char *bdot = strrchr (base, '.');
+    if (bdot) {
+        *bdot = 0;
+    }
+    char *file = g_strconcat (base, ext, NULL);
+    char *path = g_build_filename (dir, file, NULL);
+    g_free (file);
+    g_free (base);
+    return path;
+}
+
+static void
+_cover_task_add_album (mb_cover_task_t *t, const char *dir,
+        const char *mbid, const char *release_group_id, const char *artist, const char *album) {
+    mb_cover_album_t *albums = realloc (t->albums, sizeof (mb_cover_album_t) * (t->numalbums + 1));
+    if (!albums) {
+        return;
+    }
+    t->albums = albums;
+    mb_cover_album_t *a = &t->albums[t->numalbums++];
+    memset (a, 0, sizeof (*a));
+    a->dir = g_strdup (dir);
+    a->mbid = g_strdup (mbid);
+    a->release_group_id = g_strdup (release_group_id);
+    a->artist = g_strdup (artist ? artist : "");
+    a->album = g_strdup (album ? album : "");
+}
+
+// the playlist keeps local files as plain paths on unix, but file uris are
+// possible too, and both have to work here
+static char *
+_cover_uri_to_path (const char *uri) {
+    if (!uri || !*uri) {
+        return NULL;
+    }
+    if (!strncmp (uri, "file://", 7)) {
+        return g_filename_from_uri (uri, NULL, NULL);
+    }
+    if (strstr (uri, "://")) {
+        return NULL;
+    }
+    return g_strdup (uri);
+}
+
+// groups the files by the folder they are in, and takes the MusicBrainz ids
+// and the artist / album from the first file of each folder
+static void
+_cover_collect_albums (mb_cover_task_t *t, DB_playItem_t **tracks, int numtracks) {
+    deadbeef->pl_lock ();
+    for (int i = 0; i < numtracks; i++) {
+        const char *uri = deadbeef->pl_find_meta (tracks[i], ":URI");
+        if (!uri || !deadbeef->is_local_file (uri)) {
+            continue;
+        }
+        char *path = _cover_uri_to_path (uri);
+        if (!path) {
+            continue;
+        }
+        char *dir = g_path_get_dirname (path);
+        g_free (path);
+
+        mb_cover_album_t *album = NULL;
+        for (int j = 0; j < t->numalbums; j++) {
+            if (!strcmp (t->albums[j].dir, dir)) {
+                album = &t->albums[j];
+                break;
+            }
+        }
+        if (!album) {
+            _cover_task_add_album (t, dir,
+                    deadbeef->pl_find_meta (tracks[i], "musicbrainz_albumid"),
+                    deadbeef->pl_find_meta (tracks[i], "musicbrainz_releasegroupid"),
+                    deadbeef->pl_find_meta (tracks[i], "artist"),
+                    deadbeef->pl_find_meta (tracks[i], "album"));
+            if (t->numalbums == 0) {
+                g_free (dir);
+                break;
+            }
+            album = &t->albums[t->numalbums - 1];
+        }
+        album->numtracks++;
+        g_free (dir);
+    }
+    deadbeef->pl_unlock ();
+}
+
+static void
+_cover_task_free (mb_cover_task_t *t) {
+    if (!t) {
+        return;
+    }
+    if (_cover_task == t) {
+        _cover_task = NULL;
+    }
+    for (int i = 0; i < t->numalbums; i++) {
+        g_free (t->albums[i].dir);
+        g_free (t->albums[i].mbid);
+        g_free (t->albums[i].release_group_id);
+        g_free (t->albums[i].artist);
+        g_free (t->albums[i].album);
+    }
+    free (t->albums);
+    free (t);
+}
+
+// the front image is what a music player shows as "the" cover, so it wins
+// over the other types
+static const mb_cover_t *
+_cover_pick (const mb_cover_list_t *list) {
+    const mb_cover_t *fallback = NULL;
+    for (int i = 0; i < list->num_covers; i++) {
+        const mb_cover_t *c = &list->covers[i];
+        if (!c->image) {
+            continue;
+        }
+        if (c->front && c->approved) {
+            return c;
+        }
+        if (!fallback) {
+            fallback = c;
+        }
+    }
+    return fallback;
+}
+
+static void
+_cover_worker (void *ctx) {
+    mb_cover_task_t *t = ctx;
+
+    for (int i = 0; i < t->numalbums && !t->abort; i++) {
+        mb_cover_album_t *album = &t->albums[i];
+
+        char *mbid = g_strdup (album->mbid);
+        char *release_group_id = g_strdup (album->release_group_id);
+
+        if ((!mbid || !*mbid) && album->album[0]) {
+            // the files were not tagged by the tagger, so look the release up
+            // by artist and album instead; the number of files in the folder is
+            // only a hint, as a partial album would otherwise match nothing
+            mb_result_t *result = mb_search (album->artist, album->album, album->numtracks, &t->abort);
+            if (result && result->num_releases == 0 && album->numtracks > 0 && !t->abort) {
+                mb_result_free (result);
+                result = mb_search (album->artist, album->album, -1, &t->abort);
+            }
+            if (result && result->num_releases > 0) {
+                g_free (mbid);
+                mbid = g_strdup (result->releases[0].release_id);
+                if (!release_group_id || !*release_group_id) {
+                    g_free (release_group_id);
+                    release_group_id = g_strdup (result->releases[0].release_group_id);
+                }
+            }
+            mb_result_free (result);
+        }
+
+        if (!mbid || !*mbid) {
+            // nothing could be matched, which is a missing cover, not a failure
+            g_free (mbid);
+            g_free (release_group_id);
+            t->notfound++;
+            t->current++;
+            continue;
+        }
+
+        mb_cover_list_t *covers = mb_cover_fetch (mbid, release_group_id, &t->abort);
+        g_free (mbid);
+        g_free (release_group_id);
+
+        const mb_cover_t *cover = covers ? _cover_pick (covers) : NULL;
+        if (!cover) {
+            if (covers && covers->failed) {
+                t->failed++;
+            }
+            else {
+                t->notfound++;
+            }
+            mb_cover_list_free (covers);
+            t->current++;
+            continue;
+        }
+
+        char *path = _cover_target_path (album->dir, cover->image);
+        if (g_file_test (path, G_FILE_TEST_EXISTS)) {
+            t->skipped++;
+        }
+        else {
+            void *data = NULL;
+            size_t size = 0;
+            if (mb_cover_download (cover->image, &data, &size, &t->abort) && data) {
+                GError *err = NULL;
+                if (g_file_set_contents (path, data, size, &err)) {
+                    t->saved++;
+                }
+                else {
+                    t->failed++;
+                }
+                if (err) {
+                    g_error_free (err);
+                }
+                free (data);
+            }
+            else if (!t->abort) {
+                t->failed++;
+            }
+        }
+        g_free (path);
+        mb_cover_list_free (covers);
+        t->current++;
+    }
+
+    g_idle_add (_cover_finished_cb, t);
+}
+
+static gboolean
+_cover_finished_cb (gpointer ctx) {
+    mb_cover_task_t *t = ctx;
+
+    deadbeef->thread_join (t->tid);
+    t->tid = 0;
+    if (t->poll_source) {
+        g_source_remove (t->poll_source);
+        t->poll_source = 0;
+    }
+    _progress_destroy (&t->progress);
+
+    if (!t->abort) {
+        GString *msg = g_string_new (NULL);
+        if (t->saved > 0) {
+            g_string_append_printf (msg, _("Saved the cover art of %d album(s)."), t->saved);
+        }
+        if (t->skipped > 0) {
+            if (msg->len) {
+                g_string_append_c (msg, ' ');
+            }
+            g_string_append_printf (msg, _("%d album(s) already had a cover file."), t->skipped);
+        }
+        if (t->notfound > 0) {
+            if (msg->len) {
+                g_string_append_c (msg, ' ');
+            }
+            g_string_append_printf (msg, _("No cover art was found for %d album(s)."), t->notfound);
+        }
+        if (t->failed > 0) {
+            if (msg->len) {
+                g_string_append_c (msg, ' ');
+            }
+            g_string_append_printf (msg, _("The cover art of %d album(s) could not be fetched."), t->failed);
+        }
+        if (!msg->len) {
+            g_string_append (msg, _("No cover art was found."));
+        }
+        _show_info (msg->str);
+        g_string_free (msg, TRUE);
+    }
+
+    _cover_task_free (t);
+    return FALSE;
+}
+
+static gboolean
+_cover_poll_cb (gpointer ctx) {
+    mb_cover_task_t *t = ctx;
+    if (t->progress.window && GTK_IS_PROGRESS_BAR (t->progress.bar) && t->numalbums > 0) {
+        gtk_progress_bar_set_fraction (GTK_PROGRESS_BAR (t->progress.bar), (double)t->current / t->numalbums);
+    }
+    return TRUE;
+}
+
+static int
+_action_mb_fetch_cover (struct DB_plugin_action_s *action, ddb_action_context_t ctx) {
+    if (_cover_task) {
+        _show_error (_("A cover art download is already running."));
+        return 0;
+    }
+    ddb_playlist_t *plt = deadbeef->action_get_playlist ();
+    if (!plt) {
+        return 0;
+    }
+    DB_playItem_t **tracks = NULL;
+    int numtracks = 0;
+    trkproperties_build_track_list_for_ctx (plt, ctx, &tracks, &numtracks);
+    deadbeef->plt_unref (plt);
+
+    if (!tracks || !numtracks) {
+        trkproperties_free_track_list (&tracks, &numtracks);
+        _show_error (_("Please select the files of a local album first."));
+        return 0;
+    }
+
+    mb_cover_task_t *t = calloc (1, sizeof (mb_cover_task_t));
+    if (!t) {
+        trkproperties_free_track_list (&tracks, &numtracks);
+        return 0;
+    }
+    _cover_collect_albums (t, tracks, numtracks);
+    trkproperties_free_track_list (&tracks, &numtracks);
+
+    if (t->numalbums == 0) {
+        _cover_task_free (t);
+        _show_error (_("Cover art can only be saved next to local files."));
+        return 0;
+    }
+
+    _cover_task = t;
+    _progress_create (&t->progress, _("Cover Art"), _("Fetching cover art..."), &t->abort);
+    t->poll_source = g_timeout_add (100, _cover_poll_cb, t);
+
+    t->tid = deadbeef->thread_start (_cover_worker, t);
+    if (!t->tid) {
+        g_source_remove (t->poll_source);
+        _progress_destroy (&t->progress);
+        _cover_task_free (t);
+        _show_error (_("Failed to start the cover art download."));
+    }
+    return 0;
 }
 
 #pragma mark - release picker
@@ -1521,12 +1902,32 @@ _show_preferences (void) {
                 GTK_EXPAND | GTK_FILL, 0, 0, 0);
     }
 
+    // used by "Tagging / MusicBrainz / Fetch Cover Art"
+    int cover_row = 5 + MB_NUM_SETTINGS / 2;
+    GtkWidget *cover_label = gtk_label_new (_("Cover art file name:"));
+    gtk_misc_set_alignment (GTK_MISC (cover_label), 0.0, 0.5);
+    gtk_table_attach (GTK_TABLE (table), cover_label, 0, 1, cover_row, cover_row + 1, GTK_FILL, 0, 0, 0);
+
+    GtkWidget *cover_name = gtk_entry_new ();
+    char cover_value[256];
+    deadbeef->conf_get_str ("musicbrainz.cover_filename", "cover.jpg", cover_value, sizeof (cover_value));
+    gtk_entry_set_text (GTK_ENTRY (cover_name), cover_value);
+    gtk_table_attach (GTK_TABLE (table), cover_name, 1, 2, cover_row, cover_row + 1, GTK_EXPAND | GTK_FILL, 0, 0, 0);
+
+    GtkWidget *cover_hint = gtk_label_new (_("Saved next to the files by Fetch Cover Art"));
+    gtk_misc_set_alignment (GTK_MISC (cover_hint), 0.0, 0.5);
+    gtk_widget_set_sensitive (cover_hint, FALSE);
+    gtk_table_attach (GTK_TABLE (table), cover_hint, 0, 2, cover_row + 1, cover_row + 2, GTK_FILL, 0, 0, 0);
+
     gtk_widget_show_all (dlg);
 
     if (gtk_dialog_run (GTK_DIALOG (dlg)) == GTK_RESPONSE_OK) {
         const char *text = gtk_entry_get_text (GTK_ENTRY (server));
         deadbeef->conf_set_str ("musicbrainz.server", text ? text : "");
         deadbeef->conf_set_int ("musicbrainz.max_releases", (int)gtk_spin_button_get_value (GTK_SPIN_BUTTON (max)));
+        const char *cover_text = gtk_entry_get_text (GTK_ENTRY (cover_name));
+        deadbeef->conf_set_str ("musicbrainz.cover_filename",
+                cover_text && *cover_text ? cover_text : "cover.jpg");
         for (int i = 0; i < MB_NUM_SETTINGS; i++) {
             deadbeef->conf_set_int (mb_setting_keys[i], gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (checks[i])));
         }
@@ -1554,6 +1955,13 @@ static DB_plugin_action_t action_mb_add_toc = {
     .name = "mb_add_toc",
     .flags = DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU,
     .callback2 = _action_mb_add_toc,
+};
+
+static DB_plugin_action_t action_mb_fetch_cover = {
+    .title = "Tagging/MusicBrainz/Fetch Cover Art",
+    .name = "mb_fetch_cover",
+    .flags = DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU,
+    .callback2 = _action_mb_fetch_cover,
 };
 
 static DB_plugin_action_t action_mb_by_release_group_id = {
@@ -1593,6 +2001,7 @@ mbtagger_get_actions (DB_playItem_t *it) {
     action_mb_by_release_id.flags = flags;
     action_mb_by_release_group_id.flags = flags;
     action_mb_add_toc.flags = flags;
+    action_mb_fetch_cover.flags = flags;
     action_mb_preferences.flags = DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU;
     return &action_mb_by_toc;
 }
@@ -1603,6 +2012,7 @@ mbtagger_link_actions (DB_plugin_action_t *gtkui_actions) {
     action_mb_by_artist_album.next = &action_mb_by_release_id;
     action_mb_by_release_id.next = &action_mb_by_release_group_id;
     action_mb_by_release_group_id.next = &action_mb_add_toc;
-    action_mb_add_toc.next = &action_mb_preferences;
+    action_mb_add_toc.next = &action_mb_fetch_cover;
+    action_mb_fetch_cover.next = &action_mb_preferences;
     action_mb_preferences.next = gtkui_actions;
 }

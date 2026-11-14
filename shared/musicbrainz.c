@@ -54,6 +54,11 @@
 #define MB_MAX_ATTEMPTS 5
 #define MB_RETRY_DELAY_MS 1500
 
+#define MB_COVER_SERVER "https://coverartarchive.org"
+#define MB_COVER_MIN_REQUEST_INTERVAL_MS 250
+#define MB_COVER_CACHE_SIZE 8
+#define MB_COVER_MAX_SIZE (32 * 1024 * 1024)
+
 #define MB_ID_LEN 36
 
 extern DB_functions_t *deadbeef;
@@ -1114,7 +1119,8 @@ mb_lookup_release_ids (mb_result_t *result, json_t *ids, int numtracks, const vo
     }
 }
 
-// collects the ids of the releases which have as many tracks as the selection
+// collects the ids of the releases which have as many tracks as the selection;
+// a non positive track count means the count does not matter
 static json_t *
 mb_filtered_release_ids (json_t *releases, int numtracks) {
     json_t *ids = json_array ();
@@ -1122,7 +1128,7 @@ mb_filtered_release_ids (json_t *releases, int numtracks) {
     json_t *release;
     json_array_foreach (releases, index, release) {
         int total = 0;
-        int match = 0;
+        int match = numtracks <= 0;
         json_t *medias = json_object_get (release, "media");
         if (json_is_array (medias)) {
             json_t *media;
@@ -1980,4 +1986,352 @@ mb_strip_album_edition (const char *album) {
         }
     }
     return out;
+}
+
+#pragma mark - cover art
+
+// The cover art archive is not the rate limited web service, but it lives on
+// the same infrastructure, so its requests are throttled too, just less
+// strictly than the search queries.
+static int64_t _cover_last_request_time = 0;
+
+static int
+mb_wait_cover_rate_limit (const volatile int *abort) {
+    mb_lock ();
+    int64_t now = mb_time_ms ();
+    int64_t wait = _cover_last_request_time + MB_COVER_MIN_REQUEST_INTERVAL_MS - now;
+    if (wait < 0) {
+        wait = 0;
+    }
+    _cover_last_request_time = now + wait;
+    mb_unlock ();
+
+    while (wait > 0) {
+        if (abort && *abort) {
+            return 0;
+        }
+        int ms = wait > 100 ? 100 : (int)wait;
+        mb_sleep_ms (ms);
+        wait -= ms;
+    }
+    return !(abort && *abort);
+}
+
+typedef struct {
+    char *url;
+    char *data;
+} mb_cover_cache_entry_t;
+
+static mb_cover_cache_entry_t _cover_cache[MB_COVER_CACHE_SIZE];
+static int _cover_cache_next = 0;
+
+static char *
+mb_cover_cache_get (const char *url) {
+    char *data = NULL;
+    mb_lock ();
+    for (int i = 0; i < MB_COVER_CACHE_SIZE; i++) {
+        if (_cover_cache[i].url && !strcmp (_cover_cache[i].url, url)) {
+            data = mb_strdup (_cover_cache[i].data);
+            break;
+        }
+    }
+    mb_unlock ();
+    return data;
+}
+
+static void
+mb_cover_cache_set (const char *url, const char *data) {
+    mb_lock ();
+    int slot = _cover_cache_next;
+    _cover_cache_next = (_cover_cache_next + 1) % MB_COVER_CACHE_SIZE;
+    free (_cover_cache[slot].url);
+    free (_cover_cache[slot].data);
+    _cover_cache[slot].url = mb_strdup (url);
+    _cover_cache[slot].data = mb_strdup (data);
+    mb_unlock ();
+}
+
+// the cover art archive answers with http urls, even though it serves https
+static char *
+mb_url_https (const char *url) {
+    if (!url) {
+        return NULL;
+    }
+    if (!strncmp (url, "http://", 7)) {
+        size_t len = strlen (url + 7) + 9;
+        char *out = malloc (len);
+        if (!out) {
+            return NULL;
+        }
+        snprintf (out, len, "https://%s", url + 7);
+        return out;
+    }
+    return mb_strdup (url);
+}
+
+// downloads the whole url into memory; returns a null terminated buffer, or
+// NULL on a failed or aborted transfer
+static char *
+mb_cover_read (const char *url, size_t *out_size, const volatile int *abort) {
+    if (out_size) {
+        *out_size = 0;
+    }
+    if (!mb_wait_cover_rate_limit (abort)) {
+        return NULL;
+    }
+
+    trace ("cover art: GET %s\n", url);
+    DB_FILE *f = deadbeef->fopen (url);
+    if (!f) {
+        return NULL;
+    }
+
+    size_t size = 0;
+    size_t alloc = 65536;
+    char *data = malloc (alloc + 1);
+    if (!data) {
+        deadbeef->fclose (f);
+        return NULL;
+    }
+
+    int failed = 0;
+    for (;;) {
+        if (abort && *abort) {
+            failed = 1;
+            break;
+        }
+        if (size == alloc) {
+            if (alloc >= MB_COVER_MAX_SIZE) {
+                break;
+            }
+            char *newdata = realloc (data, alloc * 2 + 1);
+            if (!newdata) {
+                failed = 1;
+                break;
+            }
+            data = newdata;
+            alloc *= 2;
+        }
+        size_t want = alloc - size;
+        if (want > MB_COVER_MAX_SIZE - size) {
+            want = MB_COVER_MAX_SIZE - size;
+        }
+        size_t read = deadbeef->fread (data + size, 1, want, f);
+        if (!read) {
+            break;
+        }
+        size += read;
+    }
+    deadbeef->fclose (f);
+
+    // a payload which hits the cap is truncated, so it isn't a usable image
+    if (size >= MB_COVER_MAX_SIZE) {
+        failed = 1;
+    }
+
+    if (failed || !size) {
+        free (data);
+        return NULL;
+    }
+    data[size] = 0;
+    if (out_size) {
+        *out_size = size;
+    }
+    return data;
+}
+
+// fetches the json of an entity; a release without cover art is answered with
+// an html error page instead of json, which is not a failed request
+static char *
+mb_cover_get_json (const char *url, const volatile int *abort, int *failed) {
+    if (failed) {
+        *failed = 0;
+    }
+    char *cached = mb_cover_cache_get (url);
+    if (cached) {
+        return cached;
+    }
+
+    char *data = mb_cover_read (url, NULL, abort);
+    if (!data) {
+        if (failed && !(abort && *abort)) {
+            *failed = 1;
+        }
+        return NULL;
+    }
+
+    const char *p = data;
+    while (*p && isspace ((unsigned char)*p)) {
+        p++;
+    }
+    if (*p != '{') {
+        free (data);
+        return NULL;
+    }
+
+    mb_cover_cache_set (url, data);
+    return data;
+}
+
+static void
+mb_free_cover (mb_cover_t *cover) {
+    if (!cover) {
+        return;
+    }
+    free (cover->types);
+    free (cover->comment);
+    free (cover->thumbnail);
+    free (cover->image);
+    memset (cover, 0, sizeof (*cover));
+}
+
+static void
+mb_parse_cover (json_t *img, mb_cover_t *c) {
+    memset (c, 0, sizeof (*c));
+
+    json_t *types = json_object_get (img, "types");
+    if (json_is_array (types)) {
+        size_t index;
+        json_t *type;
+        json_array_foreach (types, index, type) {
+            const char *s = json_string_value (type);
+            if (s && *s) {
+                c->types = mb_strdup_append (c->types, c->types ? ", " : "", s);
+            }
+        }
+    }
+
+    c->front = json_is_true (json_object_get (img, "front"));
+    json_t *approved = json_object_get (img, "approved");
+    c->approved = json_is_boolean (approved) ? json_is_true (approved) : 1;
+
+    const char *comment = json_string_value (json_object_get (img, "comment"));
+    if (comment && *comment) {
+        c->comment = mb_strdup (comment);
+    }
+
+    c->image = mb_url_https (json_string_value (json_object_get (img, "image")));
+
+    json_t *thumbs = json_object_get (img, "thumbnails");
+    if (json_is_object (thumbs)) {
+        static const char *sizes[] = { "large", "small", "1200", NULL };
+        for (int i = 0; sizes[i] && !c->thumbnail; i++) {
+            c->thumbnail = mb_url_https (json_string_value (json_object_get (thumbs, sizes[i])));
+        }
+    }
+    if (!c->thumbnail) {
+        c->thumbnail = mb_strdup (c->image);
+    }
+}
+
+static void
+mb_cover_parse_entity (const char *entity, const char *id, const volatile int *abort,
+        mb_cover_list_t *list, int *failed) {
+    size_t len = strlen (MB_COVER_SERVER) + strlen (entity) + strlen (id) + 4;
+    char *url = malloc (len);
+    if (!url) {
+        *failed = 1;
+        return;
+    }
+    snprintf (url, len, "%s/%s/%s", MB_COVER_SERVER, entity, id);
+
+    int req_failed = 0;
+    char *data = mb_cover_get_json (url, abort, &req_failed);
+    free (url);
+    if (!data) {
+        if (req_failed) {
+            *failed = 1;
+        }
+        return;
+    }
+
+    json_error_t err;
+    json_t *root = json_loads (data, 0, &err);
+    free (data);
+    if (!root) {
+        return;
+    }
+
+    json_t *images = json_object_get (root, "images");
+    if (json_is_array (images)) {
+        size_t index;
+        json_t *img;
+        json_array_foreach (images, index, img) {
+            mb_cover_t cover;
+            mb_parse_cover (img, &cover);
+            if (!cover.image && !cover.thumbnail) {
+                mb_free_cover (&cover);
+                continue;
+            }
+            mb_cover_t *covers = realloc (list->covers, sizeof (mb_cover_t) * (list->num_covers + 1));
+            if (!covers) {
+                mb_free_cover (&cover);
+                break;
+            }
+            list->covers = covers;
+            list->covers[list->num_covers++] = cover;
+        }
+    }
+    json_decref (root);
+}
+
+mb_cover_list_t *
+mb_cover_fetch (const char *release_id, const char *release_group_id, const volatile int *abort) {
+    mb_cover_list_t *list = calloc (1, sizeof (mb_cover_list_t));
+    if (!list) {
+        return NULL;
+    }
+
+    int failed = 0;
+    if (release_id && mb_is_uuid (release_id)) {
+        mb_cover_parse_entity ("release", release_id, abort, list, &failed);
+    }
+    if (list->num_covers == 0 && !(abort && *abort)
+            && release_group_id && mb_is_uuid (release_group_id)) {
+        int group_failed = 0;
+        mb_cover_parse_entity ("release-group", release_group_id, abort, list, &group_failed);
+        if (group_failed) {
+            failed = 1;
+        }
+    }
+
+    list->failed = failed;
+    return list;
+}
+
+void
+mb_cover_list_free (mb_cover_list_t *list) {
+    if (!list) {
+        return;
+    }
+    for (int i = 0; i < list->num_covers; i++) {
+        mb_free_cover (&list->covers[i]);
+    }
+    free (list->covers);
+    free (list);
+}
+
+int
+mb_cover_download (const char *url, void **data, size_t *size, const volatile int *abort) {
+    if (data) {
+        *data = NULL;
+    }
+    if (size) {
+        *size = 0;
+    }
+    if (!url || !*url) {
+        return 0;
+    }
+
+    char *buf = mb_cover_read (url, size, abort);
+    if (!buf) {
+        return 0;
+    }
+    if (data) {
+        *data = buf;
+    }
+    else {
+        free (buf);
+    }
+    return 1;
 }
