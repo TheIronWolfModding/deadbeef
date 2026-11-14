@@ -104,6 +104,25 @@ TEST(MusicBrainzTests, discid_uses_the_pregap_from_the_cd) {
     deadbeef->plt_unref ((ddb_playlist_t *)plt);
 }
 
+TEST(MusicBrainzTests, discid_adds_the_pregap_tag_to_the_default_lead_in) {
+    playlist_t *plt = plt_alloc ("mbdiscidpgtag");
+    DB_playItem_t *tracks[1] = {_make_track (plt, 100, 44100)};
+
+    // a ripper can store the pregap of the first track in its "pregap" tag,
+    // which adds to the default 2 second lead-in
+    deadbeef->pl_replace_meta (tracks[0], "pregap", "00:02:00");
+    char *from_tag = mb_make_discid (tracks, 1, NULL);
+    char *explicit_pregap = mb_make_discid (tracks, 1, "00:04:00");
+    ASSERT_TRUE (from_tag != NULL);
+    ASSERT_TRUE (explicit_pregap != NULL);
+    EXPECT_STREQ (explicit_pregap, from_tag);
+
+    free (from_tag);
+    free (explicit_pregap);
+    _free_tracks (tracks, 1);
+    deadbeef->plt_unref ((ddb_playlist_t *)plt);
+}
+
 TEST(MusicBrainzTests, check_toc_accepts_cd_tracks_and_rejects_others) {
     playlist_t *plt = plt_alloc ("mbtoctest");
 

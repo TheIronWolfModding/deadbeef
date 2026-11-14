@@ -100,6 +100,97 @@ mb_append_value (char *base, const char *value) {
     return mb_strdup_append (base, base ? ";" : "", value);
 }
 
+// 1 if a list separated by sep contains value as a whole entry, so that a
+// label called e.g. "EMI" doesn't match "EMI Classics". Leading spaces after
+// the separator are ignored, for lists formatted as "a, b"
+static int
+mb_value_list_contains (const char *list, char sep, const char *value) {
+    if (!list || !value) {
+        return 0;
+    }
+    size_t len = strlen (value);
+    const char *p = list;
+    while (p && *p) {
+        while (*p == ' ') {
+            p++;
+        }
+        const char *end = strchr (p, sep);
+        size_t partlen = end ? (size_t)(end - p) : strlen (p);
+        while (partlen > 0 && p[partlen - 1] == ' ') {
+            partlen--;
+        }
+        if (partlen == len && !strncmp (p, value, len)) {
+            return 1;
+        }
+        p = end ? end + 1 : NULL;
+    }
+    return 0;
+}
+
+// MusicBrainz often uses typographic punctuation; this replaces it with plain
+// ASCII like foo_musicbrainz does, keeping all the bytes of the input, so that
+// the result is never longer than the source
+static char *
+mb_ascii_punctuation (const char *str) {
+    if (!str) {
+        return NULL;
+    }
+    if (!deadbeef->conf_get_int ("musicbrainz.ascii_punctuation", 0)) {
+        return mb_strdup (str);
+    }
+
+    static const struct {
+        const char *from;
+        const char *to;
+    } replacements[] = {
+        { "\xe2\x80\xa6", "..." }, // …
+        { "\xe2\x80\x98", "'" },   // ‘
+        { "\xe2\x80\x99", "'" },   // ’
+        { "\xe2\x80\x9a", "'" },   // ‚
+        { "\xe2\x80\x9c", "\"" },  // “
+        { "\xe2\x80\x9d", "\"" },  // ”
+        { "\xe2\x80\x9e", "\"" },  // „
+        { "\xe2\x80\xb2", "'" },   // ′
+        { "\xe2\x80\xb3", "\"" },  // ″
+        { "\xe2\x80\xb9", "<" },   // ‹
+        { "\xe2\x80\xba", ">" },   // ›
+        { "\xc2\xab", "\"" },      // «
+        { "\xc2\xbb", "\"" },      // »
+        { "\xe2\x80\x90", "-" },   // ‐
+        { "\xe2\x80\x92", "-" },   // ‒
+        { "\xe2\x80\x93", "-" },   // –
+        { "\xe2\x88\x92", "-" },   // −
+        { "\xe2\x80\x94", "-" },   // —
+        { "\xe2\x80\x95", "-" },   // ―
+    };
+
+    char *out = malloc (strlen (str) + 1);
+    if (!out) {
+        return mb_strdup (str);
+    }
+    char *dst = out;
+    const char *p = str;
+    while (*p) {
+        int replaced = 0;
+        for (size_t i = 0; i < sizeof (replacements) / sizeof (replacements[0]); i++) {
+            size_t len = strlen (replacements[i].from);
+            if (!strncmp (p, replacements[i].from, len)) {
+                size_t tolen = strlen (replacements[i].to);
+                memcpy (dst, replacements[i].to, tolen);
+                dst += tolen;
+                p += len;
+                replaced = 1;
+                break;
+            }
+        }
+        if (!replaced) {
+            *dst++ = *p++;
+        }
+    }
+    *dst = 0;
+    return out;
+}
+
 // 1 if a MusicBrainz ID starts at the beginning of the string, which may be
 // longer than the ID itself
 static int
@@ -540,7 +631,7 @@ mb_json_str (json_t *obj, const char *key) {
     if (!json_is_string (val)) {
         return NULL;
     }
-    return mb_strdup (json_string_value (val));
+    return mb_ascii_punctuation (json_string_value (val));
 }
 
 static int
@@ -563,13 +654,15 @@ mb_parse_artist_credit (json_t *obj, char **name, char **ids) {
     size_t index;
     json_t *part;
     json_array_foreach (credit, index, part) {
-        const char *partname = json_string_value (json_object_get (part, "name"));
+        char *partname = mb_ascii_punctuation (json_string_value (json_object_get (part, "name")));
         if (partname) {
             *name = mb_strdup_append (*name, "", partname);
+            free (partname);
         }
-        const char *join = json_string_value (json_object_get (part, "joinphrase"));
+        char *join = mb_ascii_punctuation (json_string_value (json_object_get (part, "joinphrase")));
         if (join) {
             *name = mb_strdup_append (*name, "", join);
+            free (join);
         }
         json_t *artist = json_object_get (part, "artist");
         if (json_is_object (artist)) {
@@ -661,8 +754,10 @@ mb_parse_release (json_t *json_release, int numtracks, const char *discid, mb_re
     mb_parse_artist_credit (json_release, &r->artist, &r->artist_ids);
 
     json_t *medias = json_object_get (json_release, "media");
+    int owned_medias = 0;
     if (!json_is_array (medias)) {
         medias = json_array ();
+        owned_medias = 1;
     }
 
     int release_tracks = 0;
@@ -762,6 +857,10 @@ mb_parse_release (json_t *json_release, int numtracks, const char *discid, mb_re
         free (disc_title);
     }
 
+    if (owned_medias) {
+        json_decref (medias);
+    }
+
     if (!r->num_tracks) {
         mb_free_release (r);
         return 0;
@@ -789,10 +888,11 @@ mb_parse_release (json_t *json_release, int numtracks, const char *discid, mb_re
         json_array_foreach (label_infos, li, label_info) {
             json_t *label = json_object_get (label_info, "label");
             if (json_is_object (label)) {
-                const char *name = json_string_value (json_object_get (label, "name"));
-                if (name && (!r->labels || !strstr (r->labels, name))) {
+                char *name = mb_ascii_punctuation (json_string_value (json_object_get (label, "name")));
+                if (name && !mb_value_list_contains (r->labels, ';', name)) {
                     r->labels = mb_append_value (r->labels, name);
                 }
+                free (name);
             }
             if (!r->catalog) {
                 r->catalog = mb_json_str (label_info, "catalog-number");
@@ -822,7 +922,7 @@ mb_parse_release (json_t *json_release, int numtracks, const char *discid, mb_re
         if (!format || !*format) {
             continue;
         }
-        if (!r->media || !strstr (r->media, format)) {
+        if (!mb_value_list_contains (r->media, ',', format)) {
             r->media = mb_strdup_append (r->media, r->media ? ", " : "", format);
         }
     }
@@ -858,10 +958,12 @@ mb_result_new (void) {
     return result;
 }
 
+static int mb_max_candidates (void);
+
 // appends a parsed release to the result
 static void
 mb_result_add (mb_result_t *result, mb_release_t *release) {
-    if (!result || result->num_releases >= MB_MAX_CANDIDATES) {
+    if (!result || result->num_releases >= mb_max_candidates ()) {
         mb_free_release (release);
         return;
     }
@@ -1288,20 +1390,46 @@ mb_check_toc_submission (DB_playItem_t **tracks, int numtracks) {
     return mb_samples_per_sector (tracks, numtracks) != 0;
 }
 
+// parses a mm:ss:ff cd timestamp into sectors, or returns -1 when invalid
 static int
-mb_pregap_sectors (const char *pregap_msf) {
+mb_parse_msf (const char *msf) {
+    if (!msf || strlen (msf) != 8
+            || !isdigit (msf[0]) || !isdigit (msf[1]) || msf[2] != ':'
+            || !isdigit (msf[3]) || !isdigit (msf[4]) || msf[5] != ':'
+            || !isdigit (msf[6]) || !isdigit (msf[7])) {
+        return -1;
+    }
+    int minutes = (msf[0] - '0') * 10 + (msf[1] - '0');
+    int seconds = (msf[3] - '0') * 10 + (msf[4] - '0');
+    int frames = (msf[6] - '0') * 10 + (msf[7] - '0');
+    return (minutes * 60 + seconds) * MB_CD_FRAMES_PER_SEC + frames;
+}
+
+static int
+mb_pregap_sectors (DB_playItem_t **tracks, int numtracks, const char *pregap_msf) {
     int pregap = deadbeef->conf_get_int ("musicbrainz.pregap_sectors", MB_DEFAULT_PREGAP_SECTORS);
     if (pregap < 0) {
         pregap = 0;
     }
-    if (pregap_msf && strlen (pregap_msf) == 8
-            && isdigit (pregap_msf[0]) && isdigit (pregap_msf[1]) && pregap_msf[2] == ':'
-            && isdigit (pregap_msf[3]) && isdigit (pregap_msf[4]) && pregap_msf[5] == ':'
-            && isdigit (pregap_msf[6]) && isdigit (pregap_msf[7])) {
-        int minutes = (pregap_msf[0] - '0') * 10 + (pregap_msf[1] - '0');
-        int seconds = (pregap_msf[3] - '0') * 10 + (pregap_msf[4] - '0');
-        int frames = (pregap_msf[6] - '0') * 10 + (pregap_msf[7] - '0');
-        pregap = (minutes * 60 + seconds) * MB_CD_FRAMES_PER_SEC + frames;
+    int msf = mb_parse_msf (pregap_msf);
+    if (msf >= 0) {
+        // an explicit timestamp replaces the default lead-in
+        pregap = msf;
+    }
+    else if (!pregap_msf && tracks && numtracks > 0) {
+        // like foo_musicbrainz, add the pregap of the first track to the
+        // default lead-in
+        char value[16] = "";
+        deadbeef->pl_lock ();
+        const char *meta = deadbeef->pl_find_meta (tracks[0], "pregap");
+        if (meta) {
+            snprintf (value, sizeof (value), "%s", meta);
+        }
+        deadbeef->pl_unlock ();
+        int track_pregap = mb_parse_msf (value);
+        if (track_pregap > 0) {
+            pregap += track_pregap;
+        }
     }
     return pregap;
 }
@@ -1316,7 +1444,7 @@ mb_make_sector_offsets (DB_playItem_t **tracks, int numtracks, const char *prega
     }
     memset (offsets, 0, sizeof (uint32_t) * 100);
 
-    uint32_t pos = (uint32_t)mb_pregap_sectors (pregap_msf);
+    uint32_t pos = (uint32_t)mb_pregap_sectors (tracks, numtracks, pregap_msf);
     for (int i = 0; i < numtracks; i++) {
         offsets[i + 1] = pos;
         int64_t samples;

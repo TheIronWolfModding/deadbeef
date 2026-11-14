@@ -1131,6 +1131,14 @@ _show_release_picker (mb_job_t *job) {
 }
 #pragma mark - lookup dialogs
 
+// disables the accept button of a text dialog while the entry is empty
+static void
+_text_entry_changed (GtkEditable *editable, gpointer user_data) {
+    GtkWidget **widgets = user_data; // entry, button
+    const char *text = gtk_entry_get_text (GTK_ENTRY (widgets[0]));
+    gtk_widget_set_sensitive (widgets[1], text && *text);
+}
+
 static char *
 _ask_for_text (const char *title, const char *label_text, const char *initial) {
     GtkWidget *dlg = gtk_dialog_new_with_buttons (title,
@@ -1154,6 +1162,10 @@ _ask_for_text (const char *title, const char *label_text, const char *initial) {
         gtk_entry_set_text (GTK_ENTRY (entry), initial);
     }
     gtk_table_attach (GTK_TABLE (table), entry, 1, 2, 0, 1, GTK_EXPAND | GTK_FILL, 0, 0, 0);
+
+    GtkWidget *validation[2] = { entry, gtk_dialog_get_widget_for_response (GTK_DIALOG (dlg), GTK_RESPONSE_OK) };
+    g_signal_connect (entry, "changed", G_CALLBACK (_text_entry_changed), validation);
+    _text_entry_changed (NULL, validation);
 
     gtk_widget_show_all (dlg);
 
@@ -1185,6 +1197,15 @@ _toggle_edition (GtkToggleButton *button, gpointer user_data) {
     gtk_entry_set_text (GTK_ENTRY (e->entry),
             gtk_toggle_button_get_active (button) ? e->raw : e->stripped);
     e->swapping = 0;
+}
+
+// disables the search button until both artist and album are filled in
+static void
+_artist_album_changed (GtkEditable *editable, gpointer user_data) {
+    GtkWidget **widgets = user_data; // artist, album, button
+    const char *artist = gtk_entry_get_text (GTK_ENTRY (widgets[0]));
+    const char *album = gtk_entry_get_text (GTK_ENTRY (widgets[1]));
+    gtk_widget_set_sensitive (widgets[2], artist && *artist && album && *album);
 }
 
 // asks for the artist and album, prefilled from the tags of the tracks, and
@@ -1232,6 +1253,13 @@ _ask_for_artist_album (mb_job_t *job) {
     int strips_edition = edition.raw && edition.stripped && strcmp (edition.raw, edition.stripped);
     gtk_entry_set_text (GTK_ENTRY (album), strips_edition ? edition.stripped : (edition.raw ? edition.raw : ""));
     gtk_table_attach (GTK_TABLE (table), album, 1, 2, 1, 2, GTK_EXPAND | GTK_FILL, 0, 0, 0);
+
+    GtkWidget *validation[3] = {
+        artist, album, gtk_dialog_get_widget_for_response (GTK_DIALOG (dlg), GTK_RESPONSE_OK)
+    };
+    g_signal_connect (artist, "changed", G_CALLBACK (_artist_album_changed), validation);
+    g_signal_connect (album, "changed", G_CALLBACK (_artist_album_changed), validation);
+    _artist_album_changed (NULL, validation);
 
     if (strips_edition) {
         GtkWidget *keep = gtk_check_button_new_with_mnemonic (_("_Keep the edition info in the album name"));
@@ -1408,10 +1436,11 @@ static const char *const mb_setting_keys[] = {
     "musicbrainz.write_asin",
     "musicbrainz.short_date",
     "musicbrainz.use_original_date",
+    "musicbrainz.ascii_punctuation",
 };
 
 static const int mb_setting_defaults[] = {
-    1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0,
+    1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0,
 };
 
 #define MB_NUM_SETTINGS ((int)(sizeof (mb_setting_keys) / sizeof (mb_setting_keys[0])))
@@ -1471,6 +1500,7 @@ _show_preferences (void) {
         _("Write the A_SIN"),
         _("Write only the _year of the release date"),
         _("Use the _original release date instead"),
+        _("Replace _typographic punctuation with ASCII"),
     };
 
     GtkWidget *checks[MB_NUM_SETTINGS];
