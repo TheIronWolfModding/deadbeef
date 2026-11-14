@@ -548,8 +548,13 @@ _cover_target_path (const char *dir, const char *image_url) {
         const char *query = strchr (image_url, '?');
         const char *slash = strrchr (image_url, '/');
         const char *dot = slash ? strrchr (slash, '.') : NULL;
-        if (dot && (!query || dot < query) && strlen (dot) < sizeof (ext)) {
-            snprintf (ext, sizeof (ext), "%s", dot);
+        if (dot && (!query || dot < query)) {
+            // the query string is not part of the file name
+            size_t len = query ? (size_t)(query - dot) : strlen (dot);
+            if (len < sizeof (ext)) {
+                memcpy (ext, dot, len);
+                ext[len] = 0;
+            }
         }
     }
 
@@ -565,12 +570,12 @@ _cover_target_path (const char *dir, const char *image_url) {
     return path;
 }
 
-static void
+static int
 _cover_task_add_album (mb_cover_task_t *t, const char *dir,
         const char *mbid, const char *release_group_id, const char *artist, const char *album) {
     mb_cover_album_t *albums = realloc (t->albums, sizeof (mb_cover_album_t) * (t->numalbums + 1));
     if (!albums) {
-        return;
+        return 0;
     }
     t->albums = albums;
     mb_cover_album_t *a = &t->albums[t->numalbums++];
@@ -580,6 +585,7 @@ _cover_task_add_album (mb_cover_task_t *t, const char *dir,
     a->release_group_id = g_strdup (release_group_id);
     a->artist = g_strdup (artist ? artist : "");
     a->album = g_strdup (album ? album : "");
+    return 1;
 }
 
 // the playlist keeps local files as plain paths on unix, but file uris are
@@ -623,12 +629,18 @@ _cover_collect_albums (mb_cover_task_t *t, DB_playItem_t **tracks, int numtracks
             }
         }
         if (!album) {
-            _cover_task_add_album (t, dir,
+            // the album artist is what the tagger writes and what identifies a
+            // release, so it is preferred over the per track artist, which
+            // differs between the tracks of a compilation
+            const char *artist = deadbeef->pl_find_meta (tracks[i], "album artist");
+            if (!artist || !*artist) {
+                artist = deadbeef->pl_find_meta (tracks[i], "artist");
+            }
+            if (!_cover_task_add_album (t, dir,
                     deadbeef->pl_find_meta (tracks[i], "musicbrainz_albumid"),
                     deadbeef->pl_find_meta (tracks[i], "musicbrainz_releasegroupid"),
-                    deadbeef->pl_find_meta (tracks[i], "artist"),
-                    deadbeef->pl_find_meta (tracks[i], "album"));
-            if (t->numalbums == 0) {
+                    artist,
+                    deadbeef->pl_find_meta (tracks[i], "album"))) {
                 g_free (dir);
                 break;
             }
