@@ -1005,7 +1005,11 @@ _show_release_picker (mb_job_t *job) {
             GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
             _("_Cancel"), GTK_RESPONSE_CANCEL, _("_Tag Files"), GTK_RESPONSE_OK, NULL);
     gtk_dialog_set_default_response (GTK_DIALOG (p.dialog), GTK_RESPONSE_OK);
+    // the list of releases and the tag preview need a lot of room, so the
+    // window always opens maximized, with the old default size as a fallback
+    // for window managers which ignore the maximize request for dialogs
     gtk_window_set_default_size (GTK_WINDOW (p.dialog), 900, 640);
+    gtk_window_maximize (GTK_WINDOW (p.dialog));
 
     GtkWidget *content = gtk_dialog_get_content_area (GTK_DIALOG (p.dialog));
     gtk_container_set_border_width (GTK_CONTAINER (content), 6);
