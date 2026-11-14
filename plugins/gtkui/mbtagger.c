@@ -271,7 +271,8 @@ _query_worker (void *ctx) {
 
     case MB_LOOKUP_SEARCH:
         job->result = mb_search (job->artist, job->album, job->numtracks, &job->abort);
-        if ((!job->result || !job->result->num_releases) && !job->abort) {
+        if ((!job->result || !job->result->num_releases) && !job->abort
+                && !(job->result && job->result->failed)) {
             // retry with the edition info stripped from the album name
             char *stripped = mb_strip_album_edition (job->album);
             if (stripped && strcmp (stripped, job->album ? job->album : "")) {
@@ -312,8 +313,12 @@ _query_finished_cb (gpointer ctx) {
         trace ("musicbrainz: query aborted by the user\n");
     }
     else if (!job->result || !job->result->num_releases) {
-        // a server which could not be answered at all is not an empty result
-        if (job->result && job->result->failed) {
+        // a server which could not be answered at all is not an empty result,
+        // and neither is a server which is too busy to answer right now
+        if (job->result && job->result->busy) {
+            _show_error (_("MusicBrainz is busy right now, please try again in a moment."));
+        }
+        else if (job->result && job->result->failed) {
             _show_error (_("MusicBrainz could not be reached, please try again later."));
         }
         else {

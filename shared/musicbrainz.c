@@ -51,7 +51,7 @@
 #define MB_MIN_REQUEST_INTERVAL_MS 1000
 #define MB_CACHE_SIZE 64
 #define MB_MAX_CANDIDATES 30
-#define MB_MAX_ATTEMPTS 3
+#define MB_MAX_ATTEMPTS 5
 #define MB_RETRY_DELAY_MS 1500
 
 #define MB_ID_LEN 36
@@ -532,15 +532,38 @@ mb_wait_rate_limit (const volatile int *abort) {
 }
 
 static char *
-mb_try_fetch (const char *url, const volatile int *abort);
+mb_try_fetch (const char *url, const volatile int *abort, int *server_busy);
+
+// an overloaded server answers with a 503 and a small {"error": "..."} object.
+// the status code is not visible through the vfs layer, so the body is what
+// tells such an answer apart from a real result
+static int
+mb_is_error_body (const char *data, size_t size) {
+    const char *end = data + size;
+    while (data < end && isspace ((unsigned char)*data)) {
+        data++;
+    }
+    if (data >= end || *data != '{') {
+        return 0;
+    }
+    data++;
+    while (data < end && isspace ((unsigned char)*data)) {
+        data++;
+    }
+    return end - data >= 7 && !strncmp (data, "\"error\"", 7);
+}
 
 // downloads the url, returns a null terminated buffer with the response, or
-// NULL and sets *failed. A failed request is not the same as a valid but empty
-// result -- the musicbrainz search server answers 503 every now and then
+// NULL and sets *failed, or *busy when the server was reachable but overloaded.
+// A failed request is not the same as a valid but empty result -- the
+// musicbrainz search server answers 503 every now and then
 static char *
-mb_fetch (const char *url, const volatile int *abort, int *failed) {
+mb_fetch (const char *url, const volatile int *abort, int *failed, int *busy) {
     if (failed) {
         *failed = 0;
+    }
+    if (busy) {
+        *busy = 0;
     }
 
     char *cached = mb_cache_get (url);
@@ -549,8 +572,10 @@ mb_fetch (const char *url, const volatile int *abort, int *failed) {
         return cached;
     }
 
+    int was_busy = 0;
     for (int attempt = 0; attempt < MB_MAX_ATTEMPTS; attempt++) {
-        char *data = mb_try_fetch (url, abort);
+        was_busy = 0;
+        char *data = mb_try_fetch (url, abort, &was_busy);
         if (data) {
             return data;
         }
@@ -568,11 +593,18 @@ mb_fetch (const char *url, const volatile int *abort, int *failed) {
     if (failed) {
         *failed = 1;
     }
+    if (busy && was_busy) {
+        *busy = 1;
+    }
     return NULL;
 }
 
 static char *
-mb_try_fetch (const char *url, const volatile int *abort) {
+mb_try_fetch (const char *url, const volatile int *abort, int *server_busy) {
+    if (server_busy) {
+        *server_busy = 0;
+    }
+
     if (!mb_wait_rate_limit (abort)) {
         return NULL;
     }
@@ -619,6 +651,14 @@ mb_try_fetch (const char *url, const volatile int *abort) {
         return NULL;
     }
     data[size] = 0;
+    if (mb_is_error_body (data, size)) {
+        trace ("musicbrainz: server busy: %s\n", data);
+        if (server_busy) {
+            *server_busy = 1;
+        }
+        free (data);
+        return NULL;
+    }
     mb_cache_set (url, data);
     return data;
 }
@@ -1044,10 +1084,14 @@ mb_lookup_release_ids (mb_result_t *result, json_t *ids, int numtracks, const vo
         snprintf (url, sizeof (url), "%s/ws/2/release/%s?fmt=json&inc=%s", mb_get_server (), id, MB_LOOKUP_INC);
 
         int req_failed = 0;
-        char *data = mb_fetch (url, abort, &req_failed);
+        int req_busy = 0;
+        char *data = mb_fetch (url, abort, &req_failed, &req_busy);
         if (!data) {
             if (req_failed) {
                 result->failed = 1;
+            }
+            if (req_busy) {
+                result->busy = 1;
             }
             continue;
         }
@@ -1116,9 +1160,11 @@ mb_lookup_discid (DB_playItem_t **tracks, int numtracks, const volatile int *abo
     snprintf (url, sizeof (url), "%s/ws/2/discid/%s?fmt=json&cdstubs=no&inc=%s", mb_get_server (), discid, MB_LOOKUP_INC);
 
     int req_failed = 0;
-    char *data = mb_fetch (url, abort, &req_failed);
+    int req_busy = 0;
+    char *data = mb_fetch (url, abort, &req_failed, &req_busy);
     if (!data) {
         result->failed = req_failed;
+        result->busy = req_busy;
         free (discid);
         return result;
     }
@@ -1190,10 +1236,12 @@ mb_search (const char *artist, const char *album, int numtracks, const volatile 
     free (enc_query);
 
     int req_failed = 0;
-    char *data = mb_fetch (url, abort, &req_failed);
+    int req_busy = 0;
+    char *data = mb_fetch (url, abort, &req_failed, &req_busy);
     free (url);
     if (!data) {
         result->failed = req_failed;
+        result->busy = req_busy;
         return result;
     }
     json_error_t error;
@@ -1235,9 +1283,11 @@ mb_lookup_mbid (const char *entity, const char *mbid, int numtracks, const volat
     }
 
     int req_failed = 0;
-    char *data = mb_fetch (url, abort, &req_failed);
+    int req_busy = 0;
+    char *data = mb_fetch (url, abort, &req_failed, &req_busy);
     if (!data) {
         result->failed = req_failed;
+        result->busy = req_busy;
         return result;
     }
     json_error_t error;

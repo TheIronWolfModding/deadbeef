@@ -88,6 +88,7 @@ typedef struct mb_result_s {
     int num_releases;
     int aborted;
     int failed; // the server returned an error, so this is not a real empty result
+    int busy;   // the server answered that it is overloaded, so retrying makes sense
 } mb_result_t;
 
 /// Returns 1 if the tracks look like a CD, i.e. they all have the same sample
