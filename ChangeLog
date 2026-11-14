@@ -1,5 +1,6 @@
 version 1.10.3
 	Fixed: Update mpg123 to 1.33.6, to fix a CVE
+	Added: Clear Tags item in the playlist context menu in GTKUI
 
 version 1.10.2
 	Fixed: Regression in replaygain scanner, producing INF for album gain

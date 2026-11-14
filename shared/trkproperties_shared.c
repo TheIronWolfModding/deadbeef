@@ -232,6 +232,48 @@ trkproperties_reload_tags (DB_playItem_t **tracks, int numtracks) {
     }
 }
 
+int
+trkproperties_clear_tags (DB_playItem_t **tracks, int numtracks) {
+    int files_written = 0;
+
+    for (int i = 0; i < numtracks; i++) {
+        DB_playItem_t *it = tracks[i];
+        if (!it) {
+            continue;
+        }
+
+        deadbeef->pl_lock ();
+        char decoder_id[100] = {0,};
+        const char *dec = deadbeef->pl_find_meta (it, ":DECODER");
+        if (dec) {
+            strncpy (decoder_id, dec, sizeof (decoder_id) - 1);
+        }
+        const char *uri = deadbeef->pl_find_meta (it, ":URI");
+        int is_local = uri && deadbeef->is_local_file (uri);
+        deadbeef->pl_unlock ();
+
+        // removes all user tags, custom fields and replaygain values,
+        // and clears the DDB_TAG_MASK flags of the item
+        deadbeef->pl_delete_all_meta (it);
+
+        if (is_local && decoder_id[0] && !(deadbeef->pl_get_item_flags (it) & DDB_IS_SUBTRACK)) {
+            DB_decoder_t **decoders = deadbeef->plug_get_decoder_list ();
+            for (int j = 0; decoders[j]; j++) {
+                if (!strcmp (decoders[j]->plugin.id, decoder_id)) {
+                    if (decoders[j]->write_metadata) {
+                        if (decoders[j]->write_metadata (it) == 0) {
+                            files_written++;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    return files_written;
+}
+
 static int
 string_append_multivalue (char *out, int size, DB_metaInfo_t *meta, int *clipped) {
     int initsize = size;

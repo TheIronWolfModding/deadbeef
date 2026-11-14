@@ -42,6 +42,11 @@ trkproperties_build_track_list_for_ctx (ddb_playlist_t *plt, int ctx, DB_playIte
 void
 trkproperties_reload_tags (DB_playItem_t **tracks, int numtracks);
 
+// clear all tags of the specified tracks, and rewrite the files without tags
+// returns the number of files where tags were removed
+int
+trkproperties_clear_tags (DB_playItem_t **tracks, int numtracks);
+
 int
 trkproperties_get_field_value (char *out, int size, const char *key, DB_playItem_t **tracks, int numtracks);
 

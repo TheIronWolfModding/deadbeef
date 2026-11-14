@@ -22,8 +22,10 @@
 */
 
 #include <gtk/gtk.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include "../../shared/deletefromdisk.h"
+#include "../../shared/trkproperties_shared.h"
 #include <deadbeef/strdupa.h>
 #include "actions.h"
 #include "actionhandlers.h"
@@ -38,6 +40,7 @@
 #define DISABLE_CUSTOM_TITLE
 
 extern DB_functions_t *deadbeef;
+extern GtkWidget *mainwin;
 
 static ddbUtilTrackList_t _menuPlaylist;
 static ddbUtilTrackList_t _menuTrackList;
@@ -236,6 +239,51 @@ reload_metadata_activate (GtkMenuItem     *menuitem, gpointer         user_data)
     if (_trkproperties_delegate.trkproperties_did_reload_metadata != NULL) {
         _trkproperties_delegate.trkproperties_did_reload_metadata (_trkproperties_delegate.user_data);
     }
+}
+
+static void
+on_clear_tags_activate (GtkMenuItem *menuitem, gpointer user_data) {
+    int count = ddbUtilTrackListGetTrackCount (_menuTrackList);
+    if (count == 0) {
+        return;
+    }
+    ddb_playItem_t **tracks = ddbUtilTrackListGetTracks (_menuTrackList);
+
+    char buf[1000];
+    if (count == 1) {
+        snprintf (buf, sizeof (buf), _("The tags of the selected file will be removed from the file itself."));
+    }
+    else {
+        snprintf (buf, sizeof (buf), _("The tags of all %d selected files will be removed from the files themselves."), count);
+    }
+
+    GtkWidget *dlg = gtk_message_dialog_new (GTK_WINDOW (mainwin), GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_NONE, _("Do you really want to clear the tags?"));
+    gtk_dialog_add_button (GTK_DIALOG (dlg), _("Cancel"), GTK_RESPONSE_NO);
+    gtk_dialog_add_button (GTK_DIALOG (dlg), _("Clear tags"), GTK_RESPONSE_YES);
+    gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (dlg), "%s", buf);
+    gtk_window_set_title (GTK_WINDOW (dlg), _("Warning"));
+
+#if GTK_CHECK_VERSION(3,0,0)
+    GtkWidget *btn = gtk_dialog_get_widget_for_response (GTK_DIALOG (dlg), GTK_RESPONSE_YES);
+    if (btn != NULL) {
+        gtk_style_context_add_class (gtk_widget_get_style_context (btn), "destructive-action");
+    }
+#endif
+
+    int response = gtk_dialog_run (GTK_DIALOG (dlg));
+    gtk_widget_destroy (dlg);
+    if (response != GTK_RESPONSE_YES) {
+        return;
+    }
+
+    trkproperties_clear_tags (tracks, count);
+
+    ddb_playlist_t *plt = ddbUtilTrackListGetPlaylist (_menuTrackList);
+    if (plt != NULL) {
+        deadbeef->plt_modified (plt);
+    }
+    deadbeef->pl_save_current ();
+    deadbeef->sendmessage (DB_EV_PLAYLISTCHANGED, 0, DDB_PLAYLIST_CHANGE_CONTENT, 0);
 }
 
 static void
@@ -477,6 +525,7 @@ trk_context_menu_build (GtkWidget *menu) {
     GtkWidget *separator9;
     GtkWidget *properties1;
     GtkWidget *reload_metadata;
+    GtkWidget *clear_tags;
 
     GtkAccelGroup *accel_group = NULL;
     accel_group = gtk_accel_group_new ();
@@ -535,6 +584,11 @@ trk_context_menu_build (GtkWidget *menu) {
     gtk_widget_show (reload_metadata);
     gtk_container_add (GTK_CONTAINER (menu), reload_metadata);
     gtk_widget_set_sensitive(reload_metadata, selected_count != 0);
+
+    clear_tags = gtk_menu_item_new_with_mnemonic (_("Clear Tags"));
+    gtk_widget_show (clear_tags);
+    gtk_container_add (GTK_CONTAINER (menu), clear_tags);
+    gtk_widget_set_sensitive (clear_tags, selected_count != 0);
 
     separator = gtk_separator_menu_item_new ();
     gtk_widget_show (separator);
@@ -660,6 +714,9 @@ trk_context_menu_build (GtkWidget *menu) {
 
     g_signal_connect ((gpointer) reload_metadata, "activate",
                       G_CALLBACK (reload_metadata_activate),
+                      NULL);
+    g_signal_connect ((gpointer) clear_tags, "activate",
+                      G_CALLBACK (on_clear_tags_activate),
                       NULL);
     if (!hide_remove_from_disk && remove_from_disk != NULL) {
         g_signal_connect ((gpointer) remove_from_disk, "activate",

@@ -1752,6 +1752,7 @@
 		2D92D32A29B92FC800218F1D /* trkproperties_shared.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D1F129B92DF900218F1D /* trkproperties_shared.c */; };
 		2D92D32B29B92FC900218F1D /* trkproperties_shared.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D1F129B92DF900218F1D /* trkproperties_shared.c */; };
 		2D92D32C29B92FCA00218F1D /* trkproperties_shared.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D1F129B92DF900218F1D /* trkproperties_shared.c */; };
+		2D92D32D29B92FCB00218F1D /* trkproperties_shared.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D1F129B92DF900218F1D /* trkproperties_shared.c */; };
 		2D92D32D29B9305B00218F1D /* pluginsettings.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D21729B92DF900218F1D /* pluginsettings.c */; };
 		2D92D32E29B9305B00218F1D /* ctmap.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D21E29B92DF900218F1D /* ctmap.c */; };
 		2D92D33029B9305B00218F1D /* pluginsettings.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D21729B92DF900218F1D /* pluginsettings.c */; };
@@ -2043,6 +2044,7 @@
 		2DA7C22F251002390080963D /* artwork_flac.h in Headers */ = {isa = PBXBuildFile; fileRef = 2DA7C22D251002390080963D /* artwork_flac.h */; };
 		2DA7C230251002390080963D /* artwork_flac.c in Sources */ = {isa = PBXBuildFile; fileRef = 2DA7C22E251002390080963D /* artwork_flac.c */; };
 		2DA80C7426C0708200E8EC7F /* CuesheetTests.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DE7A8FA1CA493CE00318A9F /* CuesheetTests.cpp */; };
+		2DA80C7526C0708200E8EC7F /* ClearTagsTests.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2DE7A8FB1CA493CE00318A9F /* ClearTagsTests.cpp */; };
 		2DA84F7E24F58915003507A2 /* libjansson.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 2DA84F7B24F58894003507A2 /* libjansson.dylib */; };
 		2DA84F7F24F5892A003507A2 /* libjansson.dylib in Copy Plugins */ = {isa = PBXBuildFile; fileRef = 2DA84F7B24F58894003507A2 /* libjansson.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		2DA8912125FFEB9B0084860D /* PlaylistGroup.h in Headers */ = {isa = PBXBuildFile; fileRef = 2DA8911F25FFEB9B0084860D /* PlaylistGroup.h */; };
@@ -7435,6 +7437,7 @@
 		2DE77482275E89DF00890350 /* callbacks.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = callbacks.h; path = plugins/converter/callbacks.h; sourceTree = "<group>"; };
 		2DE7A7B019A689E600F8C0B8 /* bufferingTemplate.pdf */ = {isa = PBXFileReference; lastKnownFileType = image.pdf; path = bufferingTemplate.pdf; sourceTree = "<group>"; };
 		2DE7A8FA1CA493CE00318A9F /* CuesheetTests.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CuesheetTests.cpp; sourceTree = "<group>"; };
+		2DE7A8FB1CA493CE00318A9F /* ClearTagsTests.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = ClearTagsTests.cpp; sourceTree = "<group>"; };
 		2DE92F2F1BAFFB4F00F37154 /* wavpack.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = wavpack.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 		2DEBA1CF23E207A3000E4135 /* EqualizerWindowController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EqualizerWindowController.h; sourceTree = "<group>"; };
 		2DEBA1D023E207A3000E4135 /* EqualizerWindowController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = EqualizerWindowController.m; sourceTree = "<group>"; };
@@ -12188,6 +12191,7 @@
 				2DAA4C0A1AAF88DE00519559 /* Supporting Files */,
 				2D7492861CCFFE7700D3A59E /* TestData */,
 				2D5659C12AF7ACC10014443E /* AlbumNavigationTests.cpp */,
+				2DE7A8FB1CA493CE00318A9F /* ClearTagsTests.cpp */,
 				2D4A9467223EFC6700199551 /* CoreAudioTests.m */,
 				2DE7A8FA1CA493CE00318A9F /* CuesheetTests.cpp */,
 				2DA66ECC1EDF501000E20989 /* fakein.c */,
@@ -19014,6 +19018,8 @@
 				2DFF2561309524A6004C03E7 /* LayoutManagerTests.m in Sources */,
 				2DAA4C141AAF88FF00519559 /* TitleFormattingTests.cpp in Sources */,
 				2D5659C22AF7ACC10014443E /* AlbumNavigationTests.cpp in Sources */,
+				2DA80C7526C0708200E8EC7F /* ClearTagsTests.cpp in Sources */,
+				2D92D32D29B92FCB00218F1D /* trkproperties_shared.c in Sources */,
 				2DB521192AAC694700B6250A /* scriptable_tfquery.c in Sources */,
 				2D4A9468223EFC6700199551 /* CoreAudioTests.m in Sources */,
 				4D31BECE1E9FB194001D1B89 /* ResamplerTests.cpp in Sources */,
