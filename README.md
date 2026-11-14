@@ -85,6 +85,15 @@ pacman -S mingw-w64-x86_64-jansson mingw-w64-x86_64-gtk3 mingw-w64-x86_64-gtk2 m
 
 * GTK3 uses [Windows-10](https://github.com/B00merang-Project/Windows-10) theme and [Windows-10-Icons](https://github.com/B00merang-Artwork/Windows-10) by default. If they are not in msys2 tree, then they must be manually placed in the `share/icons` and `share/themes`. A different theme can be specified by editing the `etc/gtk-3.0/settings.ini` file.
 
+## Notes
+
+Parts of this fork, including the MusicBrainz tagger and the lyrics plugin,
+were written with the help of various LLMs. They follow the ideas of
+[foo_musicbrainz](https://github.com/kbuffington/foo_musicbrainz) (MIT,
+Kirill Korolyov, marc2003) and
+[foo_openlyrics](https://github.com/jacquesh/foo_openlyrics) (MIT, Jacques
+Heunis); no source code was copied.
+
 ## Supporting this project
 
 [Please visit the support page](http://deadbeef.sourceforge.net/support.html)
