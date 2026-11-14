@@ -27,6 +27,7 @@
 #include <assert.h>
 #include <gtk/gtk.h>
 #include <string.h>
+#include <strings.h>
 #include "../support.h"
 #include "../interface.h"
 #include "../ctmapping.h"
@@ -40,14 +41,117 @@ enum {
     PLUGIN_LIST_COL_TITLE,
     PLUGIN_LIST_COL_IDX,
     PLUGIN_LIST_COL_BUILTIN,
-    PLUGIN_LIST_COL_HASCONFIG
+    PLUGIN_LIST_COL_HASCONFIG,
+    PLUGIN_LIST_COL_LOADED,
+    PLUGIN_LIST_COL_FNAME,
+    PLUGIN_LIST_COL_CAN_TOGGLE,
+    PLUGIN_LIST_COL_COUNT
 };
+
+// Plugins named here (file name without the extension, space separated) are
+// skipped by the plugin loader when it scans the plugin folders. The core only
+// reads this key while starting up, which is why the checkbox below says that
+// it applies on the next start.
+static const char *blacklist_key = "blacklist_plugins";
+
+// The core reads the key into a buffer of this size, so anything longer would
+// be silently cut short at startup.
+static const int blacklist_max_len = 900;
 
 static GtkWidget *prefwin;
 static GtkListStore *pluginliststore;
 static GtkTreeModelFilter *pluginliststore_filtered;
 static GtkMenu *pluginlistmenu;
 static GtkWidget *copyright_window;
+static GtkWidget *plugin_state_label;
+
+static void
+set_plugin_state_label (const char *text) {
+    if (plugin_state_label) {
+        gtk_label_set_text (GTK_LABEL (plugin_state_label), text);
+    }
+}
+
+// Strips the directory and the ".so", which is the form the loader's blacklist
+// expects.
+static void
+blacklist_name_from_path (const char *path, char *out, size_t outlen) {
+    const char *base = strrchr (path, '/');
+    base = base ? base + 1 : path;
+    size_t l = strlen (base);
+    if (l > 3 && !strcasecmp (base + l - 3, ".so")) {
+        l -= 3;
+    }
+    if (l > outlen - 1) {
+        l = outlen - 1;
+    }
+    memcpy (out, base, l);
+    out[l] = 0;
+}
+
+static gboolean
+plugin_is_blacklisted (const char *name) {
+    char buf[4096];
+    deadbeef->conf_get_str (blacklist_key, "", buf, sizeof (buf));
+    const char *p = buf;
+    while (*p) {
+        while (*p && *p <= ' ') {
+            p++;
+        }
+        const char *e = p;
+        while (*e && *e > ' ') {
+            e++;
+        }
+        if (e > p && strlen (name) == (size_t)(e - p) && !strncmp (p, name, e - p)) {
+            return TRUE;
+        }
+        p = e;
+    }
+    return FALSE;
+}
+
+// Rewrites the key with the name added or removed, and saves the config right
+// away so the choice survives even if the player is killed.
+static gboolean
+plugin_set_blacklisted (const char *name, gboolean blacklisted) {
+    char buf[4096];
+    deadbeef->conf_get_str (blacklist_key, "", buf, sizeof (buf));
+
+    GString *out = g_string_new (NULL);
+    const char *p = buf;
+    while (*p) {
+        while (*p && *p <= ' ') {
+            p++;
+        }
+        const char *e = p;
+        while (*e && *e > ' ') {
+            e++;
+        }
+        int same = e > p && strlen (name) == (size_t)(e - p) && !strncmp (p, name, e - p);
+        if (e > p && !same) {
+            if (out->len) {
+                g_string_append_c (out, ' ');
+            }
+            g_string_append_len (out, p, e - p);
+        }
+        p = e;
+    }
+    if (blacklisted) {
+        if (out->len) {
+            g_string_append_c (out, ' ');
+        }
+        g_string_append (out, name);
+    }
+
+    gboolean ok = out->len < blacklist_max_len;
+    if (ok) {
+        deadbeef->conf_set_str (blacklist_key, out->str);
+        deadbeef->conf_save ();
+        deadbeef->sendmessage (DB_EV_CONFIGCHANGED, 0, 0, 0);
+    }
+    g_string_free (out, TRUE);
+    return ok;
+}
 
 void
 on_only_show_plugins_with_configuration1_activate
@@ -109,11 +213,30 @@ on_pref_pluginlist_cursor_changed      (GtkTreeView     *treeview,
     gtk_tree_model_get (model, &iter, PLUGIN_LIST_COL_IDX, &idx, -1);
 
     DB_plugin_t **plugins = deadbeef->plug_get_list ();
+    GtkWidget *w = prefwin;
+    assert (w);
+
+    // Plugins that were blacklisted (or otherwise did not load) have no entry
+    // in the loaded list, so there is nothing to describe for those rows.
+    if (idx < 0 || !plugins[idx]) {
+        gtk_entry_set_text (GTK_ENTRY (lookup_widget (w, "plug_version")), "");
+        gtk_text_buffer_set_text (gtk_text_view_get_buffer (GTK_TEXT_VIEW (lookup_widget (w, "plug_description"))), _("Not loaded"), -1);
+        gtk_text_buffer_set_text (gtk_text_view_get_buffer (GTK_TEXT_VIEW (lookup_widget (w, "plug_license"))), "", -1);
+        gtk_link_button_set_uri (GTK_LINK_BUTTON (lookup_widget (w, "weblink")), "");
+        gtk_widget_set_sensitive (lookup_widget (w, "weblink"), FALSE);
+
+        GtkWidget *container = lookup_widget (w, "plug_conf_dlg_viewport");
+        GtkWidget *child = gtk_bin_get_child (GTK_BIN (container));
+        if (child) {
+            gtk_widget_destroy (child);
+        }
+        gtk_widget_hide (lookup_widget (w, "plugin_actions_btnbox"));
+        return;
+    }
+
     DB_plugin_t *p = plugins[idx];
 
     assert (p);
-    GtkWidget *w = prefwin;
-    assert (w);
 
     char s[20];
     snprintf (s, sizeof (s), "%d.%d", p->version_major, p->version_minor);
@@ -264,37 +387,175 @@ on_plugin_notebook_switch_page         (GtkNotebook     *notebook,
     g_signal_handlers_unblock_matched ((gpointer)notebook, mask, detail, 0, NULL, NULL, NULL);
 }
 
+// The "Loaded" checkbox. Flipping it does not touch the running player: it only
+// rewrites the blacklist that the plugin loader reads at startup.
+static void
+on_plugin_loaded_toggled      (GtkCellRendererToggle *cell,
+                               gchar                 *path_str,
+                               gpointer               user_data) {
+    GtkTreeView *tree = GTK_TREE_VIEW (user_data);
+    GtkTreeModel *model = gtk_tree_view_get_model (tree);
+    GtkTreePath *path = gtk_tree_path_new_from_string (path_str);
+    GtkTreeIter iter;
+
+    if (!path || !gtk_tree_model_get_iter (model, &iter, path)) {
+        gtk_tree_path_free (path);
+        return;
+    }
+    gtk_tree_path_free (path);
+
+    // The tree shows either the store or its filtered view, and the path above
+    // is in whatever model is currently displayed.
+    if (GTK_IS_TREE_MODEL_FILTER (model)) {
+        GtkTreeIter child;
+        gtk_tree_model_filter_convert_iter_to_child_iter (GTK_TREE_MODEL_FILTER (model), &child, &iter);
+        iter = child;
+        model = GTK_TREE_MODEL (pluginliststore);
+    }
+
+    gint idx;
+    gchar *fname;
+    gboolean loaded;
+    gtk_tree_model_get (model, &iter,
+                        PLUGIN_LIST_COL_FNAME, &fname,
+                        PLUGIN_LIST_COL_LOADED, &loaded,
+                        PLUGIN_LIST_COL_IDX, &idx, -1);
+
+    if (!fname || !*fname) {
+        g_free (fname);
+        return;
+    }
+
+    DB_plugin_t **plugins = deadbeef->plug_get_list ();
+    if (idx >= 0 && plugins[idx] && plugins[idx]->type == DB_PLUGIN_GUI) {
+        set_plugin_state_label (_("The interface plugin cannot be disabled."));
+        g_free (fname);
+        return;
+    }
+
+    char name[256];
+    blacklist_name_from_path (fname, name, sizeof (name));
+    g_free (fname);
+
+    // The new enabled state is !loaded, so its blacklist state is loaded.
+    if (!plugin_set_blacklisted (name, loaded)) {
+        set_plugin_state_label (_("Too many plugins are disabled to record the choice."));
+        return;
+    }
+
+    gtk_list_store_set (pluginliststore, &iter, PLUGIN_LIST_COL_LOADED, !loaded, -1);
+    set_plugin_state_label (_("Saved. The change applies when DeaDBeeF is next started."));
+}
+
 void
 prefwin_init_plugins_tab (GtkWidget *_prefwin) {
     GtkWidget *w = prefwin = _prefwin;
     GtkTreeView *tree = GTK_TREE_VIEW (lookup_widget (w, "pref_pluginlist"));
     GtkCellRenderer *rend_text = gtk_cell_renderer_text_new ();
-    // Order is: title, index, builtin, hasconfig
-    GtkListStore *store = gtk_list_store_new (4, G_TYPE_STRING, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN);
+    GtkCellRenderer *rend_toggle = gtk_cell_renderer_toggle_new ();
+    // Order is: title, index, builtin, hasconfig, loaded, file name, can toggle
+    GtkListStore *store = gtk_list_store_new (PLUGIN_LIST_COL_COUNT, G_TYPE_STRING, G_TYPE_INT, G_TYPE_INT,
+                                              G_TYPE_BOOLEAN, G_TYPE_BOOLEAN, G_TYPE_STRING, G_TYPE_BOOLEAN);
     pluginliststore = store;
-    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes (_("Title"), rend_text, "text", PLUGIN_LIST_COL_TITLE, "weight", PLUGIN_LIST_COL_BUILTIN, NULL);
+    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes (_("Plugin"), rend_text, "text", PLUGIN_LIST_COL_TITLE, "weight", PLUGIN_LIST_COL_BUILTIN, NULL);
     gtk_tree_view_append_column (tree, col);
-    gtk_tree_view_set_headers_visible (tree, FALSE);
+    gtk_tree_view_column_set_expand (col, TRUE);
+    gtk_tree_view_set_headers_visible (tree, TRUE);
     g_object_set (G_OBJECT (rend_text), "ellipsize", PANGO_ELLIPSIZE_END, NULL);
 
     DB_plugin_t **plugins = deadbeef->plug_get_list ();
     int i;
     const char *plugindir = deadbeef->get_system_dir (DDB_SYS_DIR_PLUGIN);
+
+    // Which files are already accounted for by a loaded plugin.
+    GHashTable *loaded_files = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
     for (i = 0; plugins[i]; i++) {
         GtkTreeIter it;
-        const char *pluginpath;
         gtk_list_store_append (store, &it);
-        pluginpath = deadbeef->plug_get_path_for_plugin_ptr (plugins[i]);
-        if (!pluginpath) {
+        const char *pluginpath = deadbeef->plug_get_path_for_plugin_ptr (plugins[i]);
+        const char *fname = NULL;
+        if (pluginpath) {
+            const char *base = strrchr (pluginpath, '/');
+            fname = base ? base + 1 : pluginpath;
+            g_hash_table_add (loaded_files, g_strdup (fname));
+        }
+        else {
             pluginpath = plugindir;
         }
+
+        char name[256] = "";
+        if (fname) {
+            blacklist_name_from_path (fname, name, sizeof (name));
+        }
+
+        // The interface plugin gets no checkbox: disabling it would leave the
+        // next start with no interface at all.
+        gboolean can_toggle = plugins[i]->type != DB_PLUGIN_GUI;
+
         gtk_list_store_set (store, &it,
                             PLUGIN_LIST_COL_TITLE, plugins[i]->name,
                             PLUGIN_LIST_COL_IDX, i,
                             PLUGIN_LIST_COL_BUILTIN, strstr(pluginpath, plugindir) ? PANGO_WEIGHT_NORMAL : PANGO_WEIGHT_BOLD,
                             PLUGIN_LIST_COL_HASCONFIG, plugins[i]->configdialog ? 1 : 0,
+                            PLUGIN_LIST_COL_LOADED, !plugin_is_blacklisted (name),
+                            PLUGIN_LIST_COL_FNAME, fname,
+                            PLUGIN_LIST_COL_CAN_TOGGLE, can_toggle,
                             -1);
     }
+
+    // Plugins that are in the folder but did not load - blacklisted here, or
+    // broken - still need to appear, otherwise the checkbox for putting them
+    // back could never be reached again.
+    GDir *dir = g_dir_open (plugindir, 0, NULL);
+    if (dir) {
+        const char *entry;
+        while ((entry = g_dir_read_name (dir))) {
+            size_t l = strlen (entry);
+            if (l <= 3 || strcmp (entry + l - 3, ".so")) {
+                continue;
+            }
+            // the loader ignores these, so showing them would be misleading
+            if (strstr (entry, ".fallback.") || entry[0] == '.') {
+                continue;
+            }
+            if (g_hash_table_contains (loaded_files, entry)) {
+                continue;
+            }
+            char name[256];
+            blacklist_name_from_path (entry, name, sizeof (name));
+
+            char title[300];
+            snprintf (title, sizeof (title), "%s (%s)", name, _("not loaded"));
+
+            GtkTreeIter it;
+            gtk_list_store_append (store, &it);
+            gtk_list_store_set (store, &it,
+                                PLUGIN_LIST_COL_TITLE, title,
+                                PLUGIN_LIST_COL_IDX, -1,
+                                PLUGIN_LIST_COL_BUILTIN, PANGO_WEIGHT_NORMAL,
+                                PLUGIN_LIST_COL_HASCONFIG, FALSE,
+                                PLUGIN_LIST_COL_LOADED, !plugin_is_blacklisted (name),
+                                PLUGIN_LIST_COL_FNAME, entry,
+                                PLUGIN_LIST_COL_CAN_TOGGLE, TRUE,
+                                -1);
+        }
+        g_dir_close (dir);
+    }
+    g_hash_table_destroy (loaded_files);
+
+    // Second column: the on/off switch for the next startup.
+    GtkTreeViewColumn *tog = gtk_tree_view_column_new_with_attributes (_("Loaded"), rend_toggle,
+                                                                      "active", PLUGIN_LIST_COL_LOADED,
+                                                                      "sensitive", PLUGIN_LIST_COL_CAN_TOGGLE, NULL);
+    gtk_tree_view_append_column (tree, tog);
+    g_signal_connect (rend_toggle, "toggled", G_CALLBACK (on_plugin_loaded_toggled), tree);
+
+    // Both columns already have a fixed meaning, and sorting by the checkbox
+    // would only shuffle the list for no reason.
+    gtk_tree_view_column_set_clickable (col, FALSE);
+    gtk_tree_view_column_set_clickable (tog, FALSE);
+
     gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE(store), PLUGIN_LIST_COL_TITLE, GTK_SORT_ASCENDING);
 
     // Create a filtered model, then we switch between the two models to show/hide configurable plugins
@@ -305,6 +566,18 @@ prefwin_init_plugins_tab (GtkWidget *_prefwin) {
 
     pluginlistmenu = GTK_MENU(create_plugin_list_popup_menu ());
     gtk_menu_attach_to_widget (GTK_MENU (pluginlistmenu), GTK_WIDGET (tree), NULL);
+
+    // Says up front that the checkbox is about the next startup, because
+    // nothing visibly happens when it is flipped while running.
+    plugin_state_label = gtk_label_new (_("Unchecking a plugin stops it from loading when DeaDBeeF is next started."));
+    gtk_misc_set_alignment (GTK_MISC (plugin_state_label), 0, 0.5);
+    gtk_label_set_line_wrap (GTK_LABEL (plugin_state_label), TRUE);
+    gtk_widget_show (plugin_state_label);
+    GtkWidget *info_box = lookup_widget (w, "vbox54");
+    if (info_box) {
+        gtk_box_pack_start (GTK_BOX (info_box), plugin_state_label, FALSE, FALSE, 0);
+        gtk_box_reorder_child (GTK_BOX (info_box), plugin_state_label, 0);
+    }
 
     // We do this here so one can leave the tabs visible in the Glade designer for convenience.
     GtkNotebook *notebook = GTK_NOTEBOOK (lookup_widget (w, "plugin_notebook"));
@@ -324,6 +597,7 @@ prefwin_free_plugins (void) {
     copyright_window = NULL;
     pluginliststore = NULL;
     pluginliststore_filtered = NULL;
+    plugin_state_label = NULL;
 }
 
 static void
@@ -357,11 +631,25 @@ on_plug_copyright_clicked              (GtkButton       *button,
         // reset
         return;
     }
-    int *indices = gtk_tree_path_get_indices (path);
+    // The visible row is not necessarily the row's position in the plugin
+    // array: the list is sorted, can be filtered, and now also carries rows for
+    // plugins that did not load.
+    GtkTreeModel *model = gtk_tree_view_get_model (treeview);
+    GtkTreeIter iter;
+    if (!gtk_tree_model_get_iter (model, &iter, path)) {
+        gtk_tree_path_free (path);
+        return;
+    }
+    gtk_tree_path_free (path);
+
+    int idx;
+    gtk_tree_model_get (model, &iter, PLUGIN_LIST_COL_IDX, &idx, -1);
+
     DB_plugin_t **plugins = deadbeef->plug_get_list ();
-    DB_plugin_t *p = plugins[*indices];
-    g_free (indices);
-    assert (p);
+    if (idx < 0 || !plugins[idx]) {
+        return;
+    }
+    DB_plugin_t *p = plugins[idx];
 
     if (p->copyright) {
         show_copyright_window (p->copyright, "Copyright", &copyright_window);

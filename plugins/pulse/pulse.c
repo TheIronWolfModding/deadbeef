@@ -24,16 +24,28 @@
 
 #include <pulse/simple.h>
 #include <pulse/error.h>
+#include <pulse/pulseaudio.h>
 
 #include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef __linux__
     #include <sys/prctl.h>
 #endif
 
+// POSIX regex, used for the output device filter. mingw has no <regex.h>, there
+// the filter degrades to a case-insensitive substring match (see
+// pulse_str_contains).
+#ifndef _WIN32
+    #include <regex.h>
+#endif
+
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+    #include <ctype.h>
+#endif
 #include <deadbeef/deadbeef.h>
 
 #define trace(...) { deadbeef->log_detailed (&plugin.plugin, 0, __VA_ARGS__); }
@@ -45,6 +57,21 @@ DB_functions_t * deadbeef;
 // value has different meaning.
 #define CONFSTR_PULSE_SERVERADDR "pulse.serveraddr2"
 #define CONFSTR_PULSE_BUFFERSIZE "pulse.buffersize"
+// Output device (sink) name. The key is <output_plugin_id>_soundcard, which is
+// what gtkui's Preferences -> Sound device dropdown reads and writes.
+#define CONFSTR_PULSE_SINK "pulseaudio_soundcard"
+// Playback latency in milliseconds. 0 (or unset) keeps PulseAudio's own
+// adaptive default buffer sizing; a positive value is passed to PulseAudio as
+// the target buffer length (tlength), which is what actually controls latency.
+#define CONFSTR_PULSE_LATENCY_MS "pulse.latency_ms"
+// Regex filtering the sinks offered to the UI (Preferences -> Sound, the "Output
+// device" widget, "Next Output Device"). A sink is listed when the regex matches
+// either its name or its description, case-insensitively. Unset or empty means
+// "list every sink". This affects the device lists only, never the device used
+// for playback, so a device hidden by the filter keeps playing if it was
+// selected before the filter was set.
+#define CONFSTR_PULSE_DEVICE_FILTER "pulse.device_filter"
+#define PULSE_DEVICE_FILTER_MAXLEN 1000
 #define PULSE_DEFAULT_BUFFERSIZE 4096
 
 static intptr_t pulse_tid;
@@ -60,7 +87,210 @@ static int in_callback;
 
 static int buffer_size;
 
+// the sink / buffer size / latency that the currently open stream was created with
+static char current_sink[1000] = "default";
+static int current_buffer_size = PULSE_DEFAULT_BUFFERSIZE;
+static int current_latency_ms = 0;
+
 static void pulse_thread(void *context);
+
+static int64_t
+pulse_now_ms (void) {
+    struct timespec ts;
+    clock_gettime (CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void
+pulse_get_server (char *server, size_t size) {
+    // migrate from 0.7.x
+    deadbeef->conf_lock ();
+    int has_server2 = deadbeef->conf_get_str_fast (CONFSTR_PULSE_SERVERADDR, NULL) != NULL;
+    deadbeef->conf_unlock ();
+
+    if (!has_server2) {
+        deadbeef->conf_get_str ("pulse.serveraddr", "", server, size);
+        // convert default
+        if (!strcasecmp (server, "default")) {
+            *server = 0;
+        }
+    }
+    else {
+        deadbeef->conf_get_str (CONFSTR_PULSE_SERVERADDR, "", server, size);
+    }
+}
+
+typedef struct {
+    void (*callback)(const char *name, const char *desc, void *);
+    void *userdata;
+    char filter[PULSE_DEVICE_FILTER_MAXLEN];
+    // the sink used for playback: it is always reported, even when the filter
+    // hides it, so the device controls never lose the current selection
+    char selected[1000];
+    int regex_valid;
+#ifndef _WIN32
+    regex_t regex;
+#endif
+} pulse_enum_ctx_t;
+
+#ifdef _WIN32
+// mingw has no POSIX regex -- treat the configured filter as a plain
+// case-insensitive substring instead of a pattern.
+static int
+pulse_str_contains (const char *haystack, const char *needle) {
+    if (haystack == NULL || needle == NULL) {
+        return 0;
+    }
+    for (; *haystack; haystack++) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*n && tolower ((unsigned char)*h) == tolower ((unsigned char)*n)) {
+            h++;
+            n++;
+        }
+        if (!*n) {
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
+static int
+pulse_sink_matches_filter (const pulse_enum_ctx_t *ctx, const char *name, const char *desc) {
+    if (name != NULL && *ctx->selected && !strcmp (name, ctx->selected)) {
+        // never hide the device that is in use
+        return 1;
+    }
+    if (!ctx->filter[0]) {
+        // no filter configured -- list every sink
+        return 1;
+    }
+#ifdef _WIN32
+    return pulse_str_contains (name, ctx->filter) || pulse_str_contains (desc, ctx->filter);
+#else
+    if (ctx->regex_valid) {
+        if (regexec (&ctx->regex, name ? name : "", 0, NULL, 0) == 0) {
+            return 1;
+        }
+        if (regexec (&ctx->regex, desc ? desc : "", 0, NULL, 0) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+#endif
+}
+
+static void
+pulse_sink_info_cb (pa_context *c, const pa_sink_info *i, int eol, void *userdata) {
+    pulse_enum_ctx_t *ctx = userdata;
+    if (i != NULL && ctx->callback != NULL && pulse_sink_matches_filter (ctx, i->name, i->description)) {
+        ctx->callback (i->name, i->description, ctx->userdata);
+    }
+}
+
+static int
+pulse_wait_context_ready (pa_mainloop *ml, pa_context *ctx, int timeout_ms) {
+    int64_t deadline = pulse_now_ms () + timeout_ms;
+    for (;;) {
+        pa_context_state_t st = pa_context_get_state (ctx);
+        if (st == PA_CONTEXT_READY) {
+            return 0;
+        }
+        if (!PA_CONTEXT_IS_GOOD (st)) {
+            return -1;
+        }
+        if (pulse_now_ms () > deadline) {
+            return -1;
+        }
+        if (pa_mainloop_iterate (ml, 0, NULL) < 0) {
+            return -1;
+        }
+        usleep (10000);
+    }
+}
+
+// Enumerate PulseAudio sinks. Called by gtkui to fill the output device
+// dropdown in Preferences -> Sound. The sink name reported here is what gets
+// stored in the "pulseaudio_soundcard" conf key. Sinks not matching the
+// "pulse.device_filter" regex are skipped.
+static void
+pulse_enum_soundcards (void (*callback)(const char *name, const char *desc, void *), void *userdata) {
+    if (callback == NULL) {
+        return;
+    }
+
+    char server[1000];
+    pulse_get_server (server, sizeof (server));
+
+    pa_mainloop *ml = pa_mainloop_new ();
+    if (ml == NULL) {
+        return;
+    }
+    pa_mainloop_api *api = pa_mainloop_get_api (ml);
+    pa_context *ctx = pa_context_new (api, "Deadbeef");
+    if (ctx == NULL) {
+        pa_mainloop_free (ml);
+        return;
+    }
+
+    if (pa_context_connect (ctx, *server ? server : NULL, PA_CONTEXT_NOFLAGS, NULL) < 0) {
+        pa_context_unref (ctx);
+        pa_mainloop_free (ml);
+        return;
+    }
+
+    // compile the device filter; an invalid regex falls back to listing everything
+    pulse_enum_ctx_t ectx;
+    memset (&ectx, 0, sizeof (ectx));
+    ectx.callback = callback;
+    ectx.userdata = userdata;
+    deadbeef->conf_get_str (CONFSTR_PULSE_DEVICE_FILTER, "", ectx.filter, sizeof (ectx.filter));
+    deadbeef->conf_get_str (CONFSTR_PULSE_SINK, "default", ectx.selected, sizeof (ectx.selected));
+    if (!strcasecmp (ectx.selected, "default")) {
+        // the server default sink is not a specific device, so nothing to force into the list
+        *ectx.selected = 0;
+    }
+#ifndef _WIN32
+    if (ectx.filter[0]) {
+        int rc = regcomp (&ectx.regex, ectx.filter, REG_EXTENDED | REG_ICASE);
+        if (rc == 0) {
+            ectx.regex_valid = 1;
+        }
+        else {
+            // invalid expression -- don't hide any sink
+            trace ("pulse: invalid device filter regex \"%s\", listing all sinks\n", ectx.filter);
+            ectx.filter[0] = 0;
+        }
+    }
+#endif
+
+    if (pulse_wait_context_ready (ml, ctx, 3000) == 0) {
+        pa_operation *op = pa_context_get_sink_info_list (ctx, pulse_sink_info_cb, &ectx);
+        if (op != NULL) {
+            int64_t deadline = pulse_now_ms () + 5000;
+            while (pa_operation_get_state (op) == PA_OPERATION_RUNNING) {
+                if (pulse_now_ms () > deadline) {
+                    break;
+                }
+                if (pa_mainloop_iterate (ml, 0, NULL) < 0) {
+                    break;
+                }
+                usleep (5000);
+            }
+            pa_operation_unref (op);
+        }
+    }
+
+    pa_context_disconnect (ctx);
+    pa_context_unref (ctx);
+    pa_mainloop_free (ml);
+#ifndef _WIN32
+    if (ectx.regex_valid) {
+        regfree (&ectx.regex);
+    }
+#endif
+}
 
 static int pulse_set_spec(ddb_waveformat_t *fmt)
 {
@@ -112,43 +342,56 @@ static int pulse_set_spec(ddb_waveformat_t *fmt)
         pa_simple_free(s);
     }
 
-    pa_buffer_attr * attr = NULL;
-    //attr->maxlength = Maximum length of the buffer.
-    //attr->tlength = Playback only: target length of the buffer.
-    //attr->prebuf = Playback only: pre-buffering.
-    //attr->minreq = Playback only: minimum request.
-    //attr->fragsize = Recording only: fragment size.
+    // PulseAudio buffer attributes. When no explicit latency is configured we
+    // pass NULL so PulseAudio keeps its own (adaptive) default sizing. When
+    // "pulse.latency_ms" is set we request that much playback latency by
+    // setting tlength (target length of the buffer, in bytes). The other
+    // fields are left at -1 so PulseAudio derives them from tlength.
+    pa_buffer_attr attr_storage;
+    pa_buffer_attr *attr = NULL;
+    int latency_ms = deadbeef->conf_get_int (CONFSTR_PULSE_LATENCY_MS, 0);
+    if (latency_ms > 0 && ss.rate > 0) {
+        size_t frame_size = pa_frame_size (&ss);
+        uint32_t tlength = (uint32_t)((int64_t)latency_ms * ss.rate / 1000 * frame_size);
+        attr_storage.maxlength = (uint32_t)-1;
+        attr_storage.tlength = tlength;
+        attr_storage.prebuf = (uint32_t)-1;
+        attr_storage.minreq = (uint32_t)-1;
+        attr_storage.fragsize = (uint32_t)-1;
+        attr = &attr_storage;
+        trace ("pulse: requested latency %d ms (%u bytes)\n", latency_ms, tlength);
+    }
 
     buffer_size = deadbeef->conf_get_int(CONFSTR_PULSE_BUFFERSIZE, PULSE_DEFAULT_BUFFERSIZE);
-
-    // TODO: where list of all available devices? add this option to config too..
-    char * dev = NULL;
 
     int error;
 
     // Read serveraddr from config
     char server[1000];
+    pulse_get_server (server, sizeof (server));
 
-    // migrate from 0.7.x
-    deadbeef->conf_lock ();
-    int has_server2 = deadbeef->conf_get_str_fast (CONFSTR_PULSE_SERVERADDR, NULL) != NULL;
-    deadbeef->conf_unlock ();
-
-    if (!has_server2) {
-        deadbeef->conf_get_str ("pulse.serveraddr", "", server, sizeof (server));
-        // convert default
-        if (!strcasecmp (server, "default")) {
-            *server = 0;
-        }
-    }
-    else {
-        deadbeef->conf_get_str (CONFSTR_PULSE_SERVERADDR, "", server, sizeof (server));
-    }
+    // Read output device (sink) from config. Empty or "default" means the
+    // server default sink. This value is set by the device dropdown in
+    // Preferences -> Sound.
+    char sink[1000];
+    deadbeef->conf_get_str (CONFSTR_PULSE_SINK, "default", sink, sizeof (sink));
+    const char *dev = (*sink && strcasecmp (sink, "default")) ? sink : NULL;
 
     for (;;) {
         s = pa_simple_new(*server ? server : NULL, "Deadbeef", PA_STREAM_PLAYBACK, dev, "Music", &ss, &channel_map, attr, &error);
 
-        if (s != NULL || ss.rate <= 192000) {
+        if (s != NULL) {
+            break;
+        }
+
+        if (dev != NULL) {
+            // configured sink is unavailable -- fall back to the default sink
+            fprintf (stderr, "pulse: failed to open sink \"%s\": %s, falling back to default\n", dev, pa_strerror (error));
+            dev = NULL;
+            continue;
+        }
+
+        if (ss.rate <= 192000) {
             break;
         }
 
@@ -163,6 +406,11 @@ static int pulse_set_spec(ddb_waveformat_t *fmt)
         fprintf (stderr, "pa_simple_new failed: %s\n", strerr);
         return -1;
     }
+
+    strncpy (current_sink, dev ? dev : "default", sizeof (current_sink) - 1);
+    current_sink[sizeof (current_sink) - 1] = 0;
+    current_buffer_size = buffer_size;
+    current_latency_ms = latency_ms;
 
     return 0;
 }
@@ -392,6 +640,32 @@ static int pulse_plugin_stop(void)
     return 0;
 }
 
+// React to config changes (e.g. the device chosen in Preferences -> Sound) by
+// reinitializing the output when the sink or buffer size actually changed.
+static int
+pulse_configchanged (void) {
+    char sink[1000];
+    deadbeef->conf_get_str (CONFSTR_PULSE_SINK, "default", sink, sizeof (sink));
+    const char *want = *sink ? sink : "default";
+    int buffer = deadbeef->conf_get_int (CONFSTR_PULSE_BUFFERSIZE, PULSE_DEFAULT_BUFFERSIZE);
+    int latency = deadbeef->conf_get_int (CONFSTR_PULSE_LATENCY_MS, 0);
+
+    if (strcmp (want, current_sink) != 0 || buffer != current_buffer_size || latency != current_latency_ms) {
+        deadbeef->sendmessage (DB_EV_REINIT_SOUND, 0, 0, 0);
+    }
+    return 0;
+}
+
+static int
+pulse_message (uint32_t id, uintptr_t ctx, uint32_t p1, uint32_t p2) {
+    switch (id) {
+    case DB_EV_CONFIGCHANGED:
+        pulse_configchanged ();
+        break;
+    }
+    return 0;
+}
+
 DB_plugin_t * pulse_load(DB_functions_t *api)
 {
     deadbeef = api;
@@ -437,6 +711,7 @@ static DB_output_t plugin =
     .plugin.website = "http://deadbeef.sf.net",
     .plugin.start = pulse_plugin_start,
     .plugin.stop = pulse_plugin_stop,
+    .plugin.message = pulse_message,
     .plugin.configdialog = settings_dlg,
     .init = pulse_init,
     .free = pulse_free,
@@ -446,4 +721,5 @@ static DB_output_t plugin =
     .pause = pulse_pause,
     .unpause = pulse_unpause,
     .state = pulse_get_state,
+    .enum_soundcards = pulse_enum_soundcards,
 };

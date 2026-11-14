@@ -1536,6 +1536,8 @@ gtkui_mainwin_init (void) {
     w_reg_widget (_ ("Media library viewer"), 0, w_medialib_viewer_create, "medialibviewer", NULL);
 
     mainwin = create_mainwin ();
+    // F10 must run before GtkWindow's default key handler activates the menu.
+    g_signal_connect (mainwin, "key-press-event", G_CALLBACK (on_mainwin_menu_key_press_event), NULL);
     refresh_undo_redo_menu ();
     layoutmenu_init ();
 
@@ -1940,37 +1942,34 @@ static DB_plugin_action_t action_ml_refresh = {
 
 static DB_plugin_action_t action_rg_remove_info = { .title = "ReplayGain/Remove ReplayGain Information",
                                                     .name = "rg_remove_info",
-                                                    .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS |
-                                                             DB_ACTION_ADD_MENU,
+                                                    .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS,
                                                     .callback2 = action_rg_remove_info_handler,
                                                     .next = &action_ml_refresh };
 
 static DB_plugin_action_t action_rg_scan_selection_as_albums = {
     .title = "ReplayGain/Scan Selection As Albums (By Tags)",
     .name = "rg_scan_selection_as_albums",
-    .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU,
+    .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS,
     .callback2 = action_rg_scan_selection_as_albums_handler,
     .next = &action_rg_remove_info
 };
 
 static DB_plugin_action_t action_rg_scan_selection_as_album = { .title = "ReplayGain/Scan Selection As Single Album",
                                                                 .name = "rg_scan_selection_as_album",
-                                                                .flags = DB_ACTION_SINGLE_TRACK |
-                                                                         DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU,
+                                                                .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS,
                                                                 .callback2 = action_rg_scan_selection_as_album_handler,
                                                                 .next = &action_rg_scan_selection_as_albums };
 
 static DB_plugin_action_t action_rg_scan_per_file = { .title = "ReplayGain/Scan Per-file Track Gain",
                                                       .name = "rg_scan_perfile_track_gain",
-                                                      .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS |
-                                                               DB_ACTION_ADD_MENU,
+                                                      .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS,
                                                       .callback2 = action_rg_scan_per_file_handler,
                                                       .next = &action_rg_scan_selection_as_album };
 
 static DB_plugin_action_t action_scan_all_tracks_without_rg = {
     .title = "ReplayGain/Scan Per-file Track Gain If Not Scanned",
     .name = "scan_all_tracks_without_Rg",
-    .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU,
+    .flags = DB_ACTION_SINGLE_TRACK | DB_ACTION_MULTIPLE_TRACKS,
     .callback2 = action_scan_all_tracks_without_rg_handler,
     .next = &action_rg_scan_per_file
 };

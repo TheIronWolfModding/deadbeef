@@ -105,6 +105,11 @@ on_playrand_clicked                    (GtkButton       *button,
                                         gpointer         user_data);
 
 gboolean
+on_mainwin_menu_key_press_event        (GtkWidget       *widget,
+                                        GdkEventKey     *event,
+                                        gpointer         user_data);
+
+gboolean
 on_mainwin_key_press_event             (GtkWidget       *widget,
                                         GdkEventKey     *event,
                                         gpointer         user_data);

@@ -189,6 +189,8 @@ void
 ddb_listview_select_range (DdbListview *ps, int start, int end);
 void
 ddb_listview_scroll_to (DdbListview *listview, int rowpos);
+void
+ddb_listview_grab_focus (DdbListview *listview);
 int
 ddb_listview_list_setup (DdbListview *listview, int scroll_to);
 void

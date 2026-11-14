@@ -3057,6 +3057,13 @@ ddb_listview_scroll_to (DdbListview *listview, int pos) {
     }
 }
 
+// Keys and the cursor rectangle belong to the inner drawing area, not to the
+// DdbListview container, so the focus must be requested for that widget.
+void
+ddb_listview_grab_focus (DdbListview *listview) {
+    gtk_widget_grab_focus (listview->list);
+}
+
 /////// column management code
 
 int

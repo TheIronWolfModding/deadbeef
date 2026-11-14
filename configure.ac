@@ -119,6 +119,7 @@ AC_ARG_ENABLE(cdda,     [AS_HELP_STRING([--disable-cdda    ], [disable CD-Audio 
 AC_ARG_ENABLE(cdda-paranoia,     [AS_HELP_STRING([--disable-cdda-paranoia    ], [disable CD-Audio error correction during ripping (default: enabled)])], [enable_cdda_paranoia=$enableval], [enable_cdda_paranoia=yes])
 AC_ARG_ENABLE(gme,      [AS_HELP_STRING([--disable-gme     ], [disable Game Music Emu plugin for NSF, AY, etc (default: enabled)])], [enable_gme=$enableval], [enable_gme=yes])
 AC_ARG_ENABLE(lyrics, [AS_HELP_STRING([--enable-lyrics      ], [build lyrics viewer gui plugin (default: auto)])], [enable_lyrics=$enableval], [enable_lyrics=yes])
+AC_ARG_ENABLE(outdev, [AS_HELP_STRING([--enable-outdev      ], [build output device selector gui plugin (default: auto)])], [enable_outdev=$enableval], [enable_outdev=yes])
 AC_ARG_ENABLE(notify,   [AS_HELP_STRING([--disable-notify  ], [disable notification-daemon support plugin (default: enabled)])], [enable_notify=$enableval], [enable_notify=yes])
 AC_ARG_ENABLE(shellexec, [AS_HELP_STRING([--disable-shellexec], [disable shell commands plugin (default: enabled)])], [enable_shellexec=$enableval], [enable_shellexec=yes])
 AC_ARG_ENABLE(musepack, [AS_HELP_STRING([--disable-musepack], [disable musepack plugin (default: enabled)])], [enable_musepack=$enableval], [enable_musepack=yes])
@@ -836,6 +837,10 @@ AS_IF([test "${enable_lyrics}" != "no"], [
     HAVE_LYRICS=yes
 ])
 
+AS_IF([test "${enable_outdev}" != "no"], [
+    HAVE_OUTDEV=yes
+])
+
 AS_IF([test "${enable_medialib}" != "no"], [
     HAVE_MEDIALIB=yes
 ])
@@ -880,7 +885,7 @@ AS_IF([test "${enable_soundtouch}" != "no"], [
     HAVE_SOUNDTOUCH=yes
 ])
 
-PLUGINS_DIRS="plugins/liboggedit plugins/lastfm plugins/mp3 plugins/vorbis plugins/opus plugins/flac plugins/wavpack plugins/sndfile plugins/vfs_curl plugins/cdda plugins/gtkui plugins/alsa plugins/ffmpeg plugins/hotkeys plugins/oss plugins/artwork plugins/adplug plugins/ffap plugins/sid plugins/nullout plugins/supereq plugins/vtx plugins/gme plugins/pulse plugins/notify plugins/musepack plugins/wildmidi plugins/tta plugins/dca plugins/aac plugins/mms plugins/shellexec plugins/shellexecui plugins/dsp_libsrc plugins/m3u plugins/vfs_zip plugins/converter plugins/dumb plugins/shn plugins/psf plugins/mono2stereo plugins/alac plugins/wma plugins/pltbrowser plugins/coreaudio plugins/sc68 plugins/rg_scanner plugins/soundtouch plugins/medialib plugins/lyrics plugins/mpris"
+PLUGINS_DIRS="plugins/liboggedit plugins/lastfm plugins/mp3 plugins/vorbis plugins/opus plugins/flac plugins/wavpack plugins/sndfile plugins/vfs_curl plugins/cdda plugins/gtkui plugins/alsa plugins/ffmpeg plugins/hotkeys plugins/oss plugins/artwork plugins/adplug plugins/ffap plugins/sid plugins/nullout plugins/supereq plugins/vtx plugins/gme plugins/pulse plugins/notify plugins/musepack plugins/wildmidi plugins/tta plugins/dca plugins/aac plugins/mms plugins/shellexec plugins/shellexecui plugins/dsp_libsrc plugins/m3u plugins/vfs_zip plugins/converter plugins/dumb plugins/shn plugins/psf plugins/mono2stereo plugins/alac plugins/wma plugins/pltbrowser plugins/coreaudio plugins/sc68 plugins/rg_scanner plugins/soundtouch plugins/medialib plugins/lyrics plugins/outdev plugins/mpris"
 
 AM_CONDITIONAL(APE_USE_YASM, test "x$APE_USE_YASM" = "xyes")
 AM_CONDITIONAL(HAVE_VORBIS, test "x$HAVE_VORBISPLUGIN" = "xyes")
@@ -915,6 +920,7 @@ AM_CONDITIONAL(HAVE_MP3, test "x$HAVE_MP3" = "xyes")
 AM_CONDITIONAL(HAVE_LIBMAD, test "x$HAVE_LIBMAD" = "xyes")
 AM_CONDITIONAL(HAVE_LIBMPG123, test "x$HAVE_LIBMPG123" = "xyes")
 AM_CONDITIONAL(HAVE_LYRICS, test "x$HAVE_LYRICS" = "xyes")
+AM_CONDITIONAL(HAVE_OUTDEV, test "x$HAVE_OUTDEV" = "xyes")
 AM_CONDITIONAL(HAVE_MPRIS, test "x$HAVE_MPRIS" = "xyes")
 AM_CONDITIONAL(HAVE_OSS, test "x$HAVE_OSS" = "xyes")
 AM_CONDITIONAL(HAVE_SUPEREQ, test "x$HAVE_SUPEREQ" = "xyes")
@@ -1018,6 +1024,7 @@ plugins/rg_scanner/Makefile
 plugins/soundtouch/Makefile
 plugins/medialib/Makefile
 plugins/lyrics/Makefile
+plugins/outdev/Makefile
 plugins/mpris/Makefile
 po/Makefile.in
 intl/Makefile
@@ -1070,6 +1077,7 @@ PRINT_PLUGIN_INFO([hotkeys],[Local and global hotkeys support],[test "x$HAVE_HOT
 PRINT_PLUGIN_INFO([lastfm],[last.fm scrobbler],[test "x$HAVE_LASTFM" = "xyes"])
 PRINT_PLUGIN_INFO([libretro],[Libretro resampler plugin],[test "x$HAVE_LIBRETRO" = "xyes"])
 PRINT_PLUGIN_INFO([lyrics],[lyrics viewer gui plugin],[test "x$HAVE_LYRICS" = "xyes"])
+PRINT_PLUGIN_INFO([outdev],[output device selector gui plugin],[test "x$HAVE_OUTDEV" = "xyes"])
 PRINT_PLUGIN_INFO([m3u],[M3U and PLS playlist support],[test "x$HAVE_M3U" = "xyes"])
 PRINT_PLUGIN_INFO([medialib],[Media library],[test "x$HAVE_MEDIALIB" = "xyes"])
 PRINT_PLUGIN_INFO([mms],[mms streaming support],[test "x$HAVE_MMS" = "xyes"])

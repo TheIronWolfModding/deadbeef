@@ -167,6 +167,11 @@ _init_prefwin(void) {
         gtk_notebook_remove_page (GTK_NOTEBOOK (lookup_widget (prefwin, "notebook")), 7);
         PREFWIN_TAB_INDEX_HOTKEYS = -1;
     }
+    // Network (proxy settings, content type mapping) is not offered in the UI --
+    // the settings themselves still work, they just stay in the config file.
+    // Removed before the medialib page (5) so the page indexes stay valid.
+    gtk_notebook_remove_page (GTK_NOTEBOOK (lookup_widget (prefwin, "notebook")), PREFWIN_TAB_INDEX_NETWORK);
+    PREFWIN_TAB_INDEX_NETWORK = -1;
     if (!deadbeef->plug_get_for_id ("medialib")) {
         gtk_notebook_remove_page (GTK_NOTEBOOK (lookup_widget (prefwin, "notebook")), 5);
         PREFWIN_TAB_INDEX_MEDIALIB = -1;
@@ -195,7 +200,9 @@ _init_prefwin(void) {
 
     // network
     ctmapping_setup_init (w);
-    prefwin_init_network_tab (prefwin);
+    if (PREFWIN_TAB_INDEX_NETWORK != -1) {
+        prefwin_init_network_tab (prefwin);
+    }
 
     // list of plugins
     prefwin_init_plugins_tab (prefwin);

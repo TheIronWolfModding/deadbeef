@@ -552,6 +552,7 @@ action_toggle_menu_handler_cb (void *data) {
     int val = 1-deadbeef->conf_get_int ("gtkui.show_menu", 1);
     val ? gtk_widget_show (menu) : gtk_widget_hide (menu);
     deadbeef->conf_set_int ("gtkui.show_menu", val);
+    deadbeef->conf_save ();
     return FALSE;
 }
 

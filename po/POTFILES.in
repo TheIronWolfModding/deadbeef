@@ -57,6 +57,7 @@ plugins/gtkui/widgets/w_tabs.c
 plugins/gtkui/widgets/w_volumebar.c
 plugins/lyrics/lyrics.c
 plugins/lyrics/support.c
+plugins/outdev/outdev.c
 plugins/notify/notify.c
 plugins/pltbrowser/pltbrowser.c
 plugins/shellexecui/interface.c

@@ -58,6 +58,36 @@ gtk_enum_sound_callback (const char *name, const char *desc, void *userdata) {
     output_device_names = g_slist_append (output_device_names, g_strdup (name));
 }
 
+// The "Default Audio Device" row is not a device reported by the output plugin: it
+// means "use whatever the sound server picks". It is subject to the device filter
+// as well -- the expression is matched against the conf token "default", not the
+// localized label -- unless that is the device currently in use.
+static int
+_default_device_allowed (void) {
+    char selected[256];
+    deadbeef->conf_get_str (_get_output_soundcard_conf_name (), "default", selected, sizeof (selected));
+    if (!strcmp (selected, "default")) {
+        return 1;
+    }
+
+    char filter[256] = "";
+    deadbeef->conf_get_str ("pulse.device_filter", "", filter, sizeof (filter));
+    if (!*filter) {
+        return 1;
+    }
+
+    GError *error = NULL;
+    GRegex *regex = g_regex_new (filter, G_REGEX_CASELESS, 0, &error);
+    if (error != NULL) {
+        // invalid expression: hide nothing
+        g_error_free (error);
+        return 1;
+    }
+    int allowed = g_regex_match (regex, "default", 0, NULL) ? 1 : 0;
+    g_regex_unref (regex);
+    return allowed;
+}
+
 void
 prefwin_fill_soundcards (void) {
     if (!prefwin) {
@@ -67,9 +97,10 @@ prefwin_fill_soundcards (void) {
     GtkTreeModel *mdl = gtk_combo_box_get_model (combobox);
     gtk_list_store_clear (GTK_LIST_STORE (mdl));
 
-    gtk_combo_box_text_append_text (GTK_COMBO_BOX_TEXT (combobox), _("Default Audio Device"));
+    int show_default = _default_device_allowed ();
+    if (show_default) {
+        gtk_combo_box_text_append_text (GTK_COMBO_BOX_TEXT (combobox), _("Default Audio Device"));
 
-    {
         char soundcard_name[100];
         deadbeef->conf_get_str (_get_output_soundcard_conf_name(), "default", soundcard_name, sizeof (soundcard_name));
         if (!strcmp (soundcard_name, "default")) {
@@ -85,7 +116,9 @@ prefwin_fill_soundcards (void) {
         g_slist_free (output_device_names);
         output_device_names = NULL;
     }
-    output_device_names = g_slist_append (output_device_names, g_strdup ("default"));
+    if (show_default) {
+        output_device_names = g_slist_append (output_device_names, g_strdup ("default"));
+    }
     if (deadbeef->get_output ()->enum_soundcards) {
         deadbeef->get_output ()->enum_soundcards (gtk_enum_sound_callback, combobox);
         gtk_widget_set_sensitive (GTK_WIDGET (combobox), TRUE);
@@ -221,6 +254,72 @@ on_comboboxentry_sr_mult_44_changed    (GtkComboBox     *combobox,
     deadbeef->sendmessage (DB_EV_CONFIGCHANGED, 0, 0, 0);
 }
 
+// PulseAudio latency (ms). Stored in "pulse.latency_ms"; empty or 0 means
+// "use PulseAudio's default", which is what the plugin does when unset.
+static void
+apply_pulse_latency (GtkWidget *entry) {
+    const char *text = gtk_entry_get_text (GTK_ENTRY (entry));
+    int ms = text ? atoi (text) : 0;
+    if (ms < 0) {
+        ms = 0;
+    }
+    if (ms != deadbeef->conf_get_int ("pulse.latency_ms", 0)) {
+        deadbeef->conf_set_int ("pulse.latency_ms", ms);
+        deadbeef->sendmessage (DB_EV_CONFIGCHANGED, 0, 0, 0);
+    }
+}
+
+static void
+on_pref_pulse_latency_activate          (GtkEntry        *entry,
+                                         gpointer         user_data)
+{
+    apply_pulse_latency (GTK_WIDGET (entry));
+}
+
+static gboolean
+on_pref_pulse_latency_focus_out         (GtkWidget       *widget,
+                                         GdkEventFocus   *event,
+                                         gpointer         user_data)
+{
+    apply_pulse_latency (widget);
+    return FALSE;
+}
+
+// PulseAudio output device filter (regex). Stored in "pulse.device_filter"; an
+// empty value means "no filter", which is the default. The pulse plugin applies
+// it when it enumerates sinks, so both the stored value and the device dropdown
+// have to be updated.
+static void
+apply_pulse_device_filter (GtkWidget *entry) {
+    const char *text = gtk_entry_get_text (GTK_ENTRY (entry));
+    if (text == NULL) {
+        text = "";
+    }
+    char cur[256] = "";
+    deadbeef->conf_get_str ("pulse.device_filter", "", cur, sizeof (cur));
+    if (strcmp (cur, text)) {
+        deadbeef->conf_set_str ("pulse.device_filter", text);
+        deadbeef->sendmessage (DB_EV_CONFIGCHANGED, 0, 0, 0);
+        prefwin_fill_soundcards ();
+    }
+}
+
+static void
+on_pref_pulse_device_filter_activate    (GtkEntry        *entry,
+                                         gpointer         user_data)
+{
+    apply_pulse_device_filter (GTK_WIDGET (entry));
+}
+
+static gboolean
+on_pref_pulse_device_filter_focus_out   (GtkWidget       *widget,
+                                         GdkEventFocus   *event,
+                                         gpointer         user_data)
+{
+    apply_pulse_device_filter (widget);
+    return FALSE;
+}
+
 void
 prefwin_init_sound_tab (GtkWidget *_prefwin) {
     GtkWidget *w = prefwin = _prefwin;
@@ -248,6 +347,51 @@ prefwin_init_sound_tab (GtkWidget *_prefwin) {
     g_signal_connect ((gpointer) pref_soundcard, "changed",
                       G_CALLBACK (on_pref_soundcard_changed),
                       NULL);
+
+    // PulseAudio playback latency in milliseconds. Empty / 0 keeps the default.
+    {
+        GtkWidget *latency = lookup_widget (prefwin, "pref_pulse_latency");
+        if (latency) {
+            int ms = deadbeef->conf_get_int ("pulse.latency_ms", 0);
+            if (ms > 0) {
+                char buf[32];
+                snprintf (buf, sizeof (buf), "%d", ms);
+                gtk_entry_set_text (GTK_ENTRY (latency), buf);
+            }
+            gtk_widget_set_tooltip_text (latency,
+                _("PulseAudio playback latency in milliseconds.\n"
+                  "Leave empty (or 0) to use PulseAudio's default.\n"
+                  "Lower values reduce delay, but very low values may cause dropouts."));
+            g_signal_connect ((gpointer) latency, "activate",
+                              G_CALLBACK (on_pref_pulse_latency_activate),
+                              NULL);
+            g_signal_connect ((gpointer) latency, "focus-out-event",
+                              G_CALLBACK (on_pref_pulse_latency_focus_out),
+                              NULL);
+        }
+    }
+
+    // PulseAudio output device filter (regex). Empty means "no filter".
+    {
+        GtkWidget *filter = lookup_widget (prefwin, "pref_pulse_device_filter");
+        if (filter) {
+            char text[256] = "";
+            deadbeef->conf_get_str ("pulse.device_filter", "", text, sizeof (text));
+            gtk_entry_set_text (GTK_ENTRY (filter), text);
+            gtk_widget_set_tooltip_text (filter,
+                _("Regular expression limiting the PulseAudio devices shown in the device lists.\n"
+                  "It is matched against both the device name and its description, case-insensitively,\n"
+                  "e.g. \"SSL|JDS|Default\".\n"
+                  "Leave empty (the default) to list every device. An invalid expression lists every\n"
+                  "device too. The device in use is always listed, even when the filter hides it."));
+            g_signal_connect ((gpointer) filter, "activate",
+                              G_CALLBACK (on_pref_pulse_device_filter_activate),
+                              NULL);
+            g_signal_connect ((gpointer) filter, "focus-out-event",
+                              G_CALLBACK (on_pref_pulse_device_filter_focus_out),
+                              NULL);
+        }
+    }
 
     // 8_to_16
     prefwin_set_toggle_button("convert8to16", deadbeef->conf_get_int ("streamer.8_to_16", 1));

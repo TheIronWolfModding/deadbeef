@@ -327,12 +327,19 @@ playlist_header_refresh_cb (gpointer data) {
     return FALSE;
 }
 
+// The playlist widget puts the tab strip before the list, and GTK gives the
+// initial keyboard focus to the first focusable child of the window. Until the
+// list is clicked it therefore gets no key events, so the focus is moved to it
+// once, when the playlist is first set up.
+static gboolean s_focus_taken = FALSE;
+
 static gboolean
 playlist_setup_cb (gpointer data) {
     if (_is_detached (DDB_LISTVIEW(data))) {
         return FALSE;
     }
     DdbListview *listview = DDB_LISTVIEW(data);
+    playlist_controller_t *ctl = listview->owner;
     ddb_listview_clear_sort (listview);
     ddb_playlist_t *plt = deadbeef->plt_get_curr ();
     if (plt) {
@@ -342,7 +349,28 @@ playlist_setup_cb (gpointer data) {
             return TRUE;
         }
 
+        int count = deadbeef->plt_get_item_count (plt, PL_MAIN);
         int cursor = deadbeef->plt_get_cursor (plt, PL_MAIN);
+        if (cursor == -1) {
+            // Nothing was remembered for this playlist. Prefer the track that
+            // is already playing: deadbeef can be launched with a file, or
+            // resume the previous session, before this widget is created, so
+            // the usual "cursor follows playback" path (songstarted_cb) never
+            // runs. Otherwise fall back to the first track. This makes sure a
+            // track is always selected after startup when the playlist is not
+            // empty.
+            DB_playItem_t *playing = deadbeef->streamer_get_playing_track_safe ();
+            if (playing) {
+                cursor = deadbeef->plt_get_item_idx (plt, playing, PL_MAIN);
+                deadbeef->pl_item_unref (playing);
+            }
+            if (cursor == -1 && count > 0) {
+                cursor = 0;
+            }
+            if (cursor != -1) {
+                deadbeef->plt_set_cursor (plt, PL_MAIN, cursor);
+            }
+        }
         if (cursor != -1) {
             DB_playItem_t *it = deadbeef->pl_get_for_idx (cursor);
             if (it) {
@@ -357,6 +385,11 @@ playlist_setup_cb (gpointer data) {
         }
 
         ddb_listview_refresh(listview, DDB_REFRESH_LIST);
+
+        if (count > 0 && !ctl->is_search && !s_focus_taken) {
+            s_focus_taken = TRUE;
+            ddb_listview_grab_focus (listview);
+        }
     }
     return FALSE;
 }

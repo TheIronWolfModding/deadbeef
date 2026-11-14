@@ -168,6 +168,18 @@ on_playrand_clicked (GtkButton *button, gpointer user_data) {
 }
 
 gboolean
+on_mainwin_menu_key_press_event (GtkWidget *widget, GdkEventKey *event, gpointer user_data) {
+    // This handler runs before GTK's default menu activation, unlike the
+    // regular hotkey handler which runs after focused widgets handle keys.
+    if (!event->is_modifier && event->keyval == GDK_F10
+        && !(event->state & gtk_accelerator_get_default_mod_mask ())) {
+        action_toggle_menu_handler_cb (NULL);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+gboolean
 on_mainwin_key_press_event (GtkWidget *widget, GdkEventKey *event, gpointer user_data) {
     if (event->is_modifier) {
         return FALSE;
