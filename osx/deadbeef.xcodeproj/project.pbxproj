@@ -1770,6 +1770,12 @@
 		2D92D4A02F1A000200AAAAAA /* AnalyzerTests.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D4A02F1A000300AAAAAA /* AnalyzerTests.cpp */; };
 		2D92D5A22F1A001000AAAA02 /* musicbrainz.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D5A12F1A001000AAAA01 /* musicbrainz.c */; };
 		2D92D5A52F1A001000AAAA05 /* MusicBrainzTests.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D5A42F1A001000AAAA04 /* MusicBrainzTests.cpp */; };
+		2D92D5AC2F1A001000AAAA0C /* mbtagger.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D5AA2F1A001000AAAA0A /* mbtagger.c */; };
+		2D92D5AD2F1A001000AAAA0D /* mbtagger.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D5AA2F1A001000AAAA0A /* mbtagger.c */; };
+		2D92D5AE2F1A001000AAAA0E /* musicbrainz.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D5A12F1A001000AAAA01 /* musicbrainz.c */; };
+		2D92D5AF2F1A001000AAAA0F /* musicbrainz.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92D5A12F1A001000AAAA01 /* musicbrainz.c */; };
+		2D92D5B02F1A001000AAAA10 /* mbtagger.h in Headers */ = {isa = PBXBuildFile; fileRef = 2D92D5AB2F1A001000AAAA0B /* mbtagger.h */; };
+		2D92D5B12F1A001000AAAA11 /* mbtagger.h in Headers */ = {isa = PBXBuildFile; fileRef = 2D92D5AB2F1A001000AAAA0B /* mbtagger.h */; };
 		2D92F37C2B6D226F00BD07E8 /* UndoIntegration.h in Headers */ = {isa = PBXBuildFile; fileRef = 2D92F37A2B6D226F00BD07E8 /* UndoIntegration.h */; };
 		2D92F37D2B6D226F00BD07E8 /* UndoIntegration.m in Sources */ = {isa = PBXBuildFile; fileRef = 2D92F37B2B6D226F00BD07E8 /* UndoIntegration.m */; };
 		2D92F3822B6D250D00BD07E8 /* undointegration.c in Sources */ = {isa = PBXBuildFile; fileRef = 2D92F37F2B6D23FF00BD07E8 /* undointegration.c */; };
@@ -6596,6 +6602,8 @@
 		2D92D5A12F1A001000AAAA01 /* musicbrainz.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = musicbrainz.c; sourceTree = "<group>"; };
 		2D92D5A32F1A001000AAAA03 /* musicbrainz.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = musicbrainz.h; sourceTree = "<group>"; };
 		2D92D5A42F1A001000AAAA04 /* MusicBrainzTests.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = MusicBrainzTests.cpp; sourceTree = "<group>"; };
+		2D92D5AA2F1A001000AAAA0A /* mbtagger.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = mbtagger.c; sourceTree = "<group>"; };
+		2D92D5AB2F1A001000AAAA0B /* mbtagger.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = mbtagger.h; sourceTree = "<group>"; };
 		2D92F37A2B6D226F00BD07E8 /* UndoIntegration.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = UndoIntegration.h; sourceTree = "<group>"; };
 		2D92F37B2B6D226F00BD07E8 /* UndoIntegration.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = UndoIntegration.m; sourceTree = "<group>"; };
 		2D92F37E2B6D23FE00BD07E8 /* undointegration.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = undointegration.h; sourceTree = "<group>"; };
@@ -12969,6 +12977,8 @@
 				2DFF258130952A10004C03E7 /* layoutmanager.h */,
 				2DFF258230952A10004C03E7 /* layoutmenu.c */,
 				2DFF258330952A10004C03E7 /* layoutmenu.h */,
+				2D92D5AA2F1A001000AAAA0A /* mbtagger.c */,
+				2D92D5AB2F1A001000AAAA0B /* mbtagger.h */,
 				2DE3B6912269BB4300AFF9AE /* namedicons.c */,
 				2DE3B5BB2269BB4300AFF9AE /* namedicons.h */,
 				2D5C6AD32752B6930073632B /* plmenu.c */,
@@ -14987,6 +14997,7 @@
 				2D2556912E47680D00DA3757 /* scriptable_encoder.h in Headers */,
 				2DC656702744289C00583E14 /* tfimport.h in Headers */,
 				2DC656712744289C00583E14 /* namedicons.h in Headers */,
+				2D92D5B02F1A001000AAAA10 /* mbtagger.h in Headers */,
 				2DC656722744289C00583E14 /* interface.h in Headers */,
 				2DFF258730952A10004C03E7 /* layoutmanager.h in Headers */,
 				2DFF258B30952A10004C03E7 /* layoutmenu.h in Headers */,
@@ -15098,6 +15109,7 @@
 				2D2556952E47680D00DA3757 /* scriptable_encoder.h in Headers */,
 				2DE3B7CA2269BF1300AFF9AE /* tfimport.h in Headers */,
 				2DE3B7E22269BF3100AFF9AE /* namedicons.h in Headers */,
+				2D92D5B12F1A001000AAAA11 /* mbtagger.h in Headers */,
 				2DE3B7E72269BF3100AFF9AE /* interface.h in Headers */,
 				2DFF258830952A10004C03E7 /* layoutmanager.h in Headers */,
 				2DFF258C30952A10004C03E7 /* layoutmenu.h in Headers */,
@@ -19116,6 +19128,8 @@
 				2DC656BD2744289C00583E14 /* tagwritersettings.c in Sources */,
 				2D60EAC42771119500C28A44 /* playlistrenderer.c in Sources */,
 				2D92D32C29B92FCA00218F1D /* trkproperties_shared.c in Sources */,
+				2D92D5AF2F1A001000AAAA0F /* musicbrainz.c in Sources */,
+				2D92D5AD2F1A001000AAAA0D /* mbtagger.c in Sources */,
 				2DC656BE2744289C00583E14 /* gtkui.c in Sources */,
 				2D60EAE3277127EE00C28A44 /* ddblistviewheader.c in Sources */,
 				2DC656C12744289C00583E14 /* ddblistview.c in Sources */,
@@ -19249,6 +19263,8 @@
 				2DE3B7CF2269BF1700AFF9AE /* tagwritersettings.c in Sources */,
 				2D60EAC52771119500C28A44 /* playlistrenderer.c in Sources */,
 				2D92D32B29B92FC900218F1D /* trkproperties_shared.c in Sources */,
+				2D92D5AE2F1A001000AAAA0E /* musicbrainz.c in Sources */,
+				2D92D5AC2F1A001000AAAA0C /* mbtagger.c in Sources */,
 				2DE3B7E82269BF3100AFF9AE /* gtkui.c in Sources */,
 				2D60EAE4277127EE00C28A44 /* ddblistviewheader.c in Sources */,
 				2DE3B7C22269BF1300AFF9AE /* ddblistview.c in Sources */,

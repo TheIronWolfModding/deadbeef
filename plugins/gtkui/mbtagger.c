@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <gtk/gtk.h>
 
 #include <deadbeef/deadbeef.h>
@@ -217,6 +218,9 @@ _job_free (mb_job_t *job) {
     if (!job) {
         return;
     }
+    if (_job == job) {
+        _job = NULL;
+    }
     if (job->pulse_source) {
         g_source_remove (job->pulse_source);
         job->pulse_source = 0;
@@ -293,8 +297,9 @@ _query_worker (void *ctx) {
 static gboolean
 _query_finished_cb (gpointer ctx) {
     mb_job_t *job = ctx;
-    _job = NULL;
-
+    // _job stays set until the job is really over, which includes the release
+    // picker and writing the tags -- both run nested main loops, and the user
+    // must not be able to start a second query on top of them
     deadbeef->thread_join (job->tid);
     job->tid = 0;
     if (job->pulse_source) {
@@ -306,11 +311,14 @@ _query_finished_cb (gpointer ctx) {
     if (job->abort) {
         trace ("musicbrainz: query aborted by the user\n");
     }
-    else if (job->result && job->result->failed) {
-        _show_error (_("MusicBrainz returned an error, please try again later."));
-    }
     else if (!job->result || !job->result->num_releases) {
-        _show_error (_("No matching releases were found on MusicBrainz."));
+        // a server which could not be answered at all is not an empty result
+        if (job->result && job->result->failed) {
+            _show_error (_("MusicBrainz could not be reached, please try again later."));
+        }
+        else {
+            _show_error (_("No matching releases were found on MusicBrainz."));
+        }
     }
     else {
         // the picker takes ownership of the job
@@ -425,6 +433,12 @@ _write_tags_finished_cb (gpointer ctx) {
 
     mb_job_t *job = w->job;
 
+    if (!w->abort && w->written == 0) {
+        // the metadata of the items was updated either way, and the user has to
+        // know that it did not reach the files
+        _show_error (_("The tags could not be written to any of the files. They were only updated in the playlist."));
+    }
+
     // let the UI know that the tags of the tracks changed
     if (job->numtracks > 25) {
         deadbeef->sendmessage (DB_EV_PLAYLISTCHANGED, 0, DDB_PLAYLIST_CHANGE_CONTENT, 0);
@@ -485,10 +499,12 @@ enum {
 };
 
 enum {
-    TRK_COL_DISC,
+    TRK_COL_FILE,
     TRK_COL_NUMBER,
+    TRK_COL_SUBTITLE,
     TRK_COL_TITLE,
     TRK_COL_ARTIST,
+    TRK_COL_INDEX, // the index of the track in the release, not displayed
     TRK_NUM_COLS
 };
 
@@ -498,6 +514,31 @@ enum {
     DISC_NUM_COLS
 };
 
+// the release fields which can be edited in the dialog
+enum {
+    REL_FIELD_ARTIST,
+    REL_FIELD_ALBUM,
+    REL_FIELD_DATE,
+    REL_FIELD_ORIGINAL_DATE,
+    REL_FIELD_LABEL,
+    REL_FIELD_CATALOG,
+    REL_FIELD_BARCODE,
+    REL_FIELD_TYPE,
+    REL_FIELD_STATUS,
+    REL_NUM_FIELDS
+};
+
+// the values MusicBrainz accepts for these two fields, so that they can't be
+// mistyped; the empty string means the field stays unset
+static const char *release_group_types[] = {
+    "", "Album", "Single", "EP", "Compilation", "Soundtrack", "Spokenword",
+    "Interview", "Audiobook", "Live", "Remix", "Other", NULL
+};
+
+static const char *release_statuses[] = {
+    "", "Official", "Promotion", "Bootleg", "Pseudo-Release", NULL
+};
+
 typedef struct {
     mb_job_t *job;
     GtkWidget *dialog;
@@ -505,36 +546,76 @@ typedef struct {
     GtkListStore *trkstore;
     GtkListStore *discstore;
     GtkWidget *disccombo;
+    GtkWidget *link;
+    GtkWidget *fields[REL_NUM_FIELDS];
     int release_index;
     int discnumber; // 0 means the whole release
+    int updating; // set while the fields are filled back from the release
 } mb_picker_t;
+
+static void
+_set_string (char **dst, const char *value) {
+    char *dup = value ? strdup (value) : NULL;
+    free (*dst);
+    *dst = dup;
+}
+
+static mb_release_t *
+_picker_release (mb_picker_t *p) {
+    if (p->release_index < 0 || p->release_index >= p->job->result->num_releases) {
+        return NULL;
+    }
+    return &p->job->result->releases[p->release_index];
+}
+
+// the file name of the selected track which the release track is applied to
+static void
+_picker_filename (char *out, int size, DB_playItem_t *it) {
+    out[0] = 0;
+    if (!it) {
+        return;
+    }
+    deadbeef->pl_lock ();
+    const char *uri = deadbeef->pl_find_meta (it, ":URI");
+    if (uri) {
+        const char *base = uri;
+        for (const char *p = uri; *p; p++) {
+            if (*p == '/' || *p == '\\') {
+                base = p + 1;
+            }
+        }
+        snprintf (out, size, "%s", base);
+    }
+    deadbeef->pl_unlock ();
+}
 
 static void
 _picker_update_tracks (mb_picker_t *p) {
     gtk_list_store_clear (p->trkstore);
 
-    if (p->release_index < 0 || p->release_index >= p->job->result->num_releases) {
+    mb_release_t *rel = _picker_release (p);
+    if (!rel) {
         return;
     }
-    mb_release_t *rel = &p->job->result->releases[p->release_index];
 
     // show the tracks of the selected disc, or of the whole release,
     // sorted by disc and track number
-    const mb_track_t **ordered = calloc (rel->num_tracks, sizeof (mb_track_t *));
+    int *ordered = calloc (rel->num_tracks, sizeof (int));
     if (!ordered) {
         return;
     }
     int n = 0;
     for (int i = 0; i < rel->num_tracks; i++) {
         if (p->discnumber <= 0 || rel->tracks[i].discnumber == p->discnumber) {
-            ordered[n++] = &rel->tracks[i];
+            ordered[n++] = i;
         }
     }
     for (int i = 1; i < n; i++) {
-        const mb_track_t *tmp = ordered[i];
+        int tmp = ordered[i];
         int j = i - 1;
-        while (j >= 0 && (ordered[j]->discnumber > tmp->discnumber
-                || (ordered[j]->discnumber == tmp->discnumber && ordered[j]->tracknumber > tmp->tracknumber))) {
+        while (j >= 0 && (rel->tracks[ordered[j]].discnumber > rel->tracks[tmp].discnumber
+                || (rel->tracks[ordered[j]].discnumber == rel->tracks[tmp].discnumber
+                    && rel->tracks[ordered[j]].tracknumber > rel->tracks[tmp].tracknumber))) {
             ordered[j+1] = ordered[j];
             j--;
         }
@@ -542,20 +623,21 @@ _picker_update_tracks (mb_picker_t *p) {
     }
 
     for (int i = 0; i < n; i++) {
-        const mb_track_t *t = ordered[i];
-        char num[16];
-        snprintf (num, sizeof (num), "%d", t->tracknumber);
-        char disc[16] = "";
-        if (p->discnumber <= 0 && t->totaldiscs > 1) {
-            snprintf (disc, sizeof (disc), "%d", t->discnumber);
-        }
+        const mb_track_t *t = &rel->tracks[ordered[i]];
+        char num[32];
+        snprintf (num, sizeof (num), "%d.%02d", t->discnumber, t->tracknumber);
+        char file[512];
+        _picker_filename (file, sizeof (file), i < p->job->numtracks ? p->job->tracks[i] : NULL);
+
         GtkTreeIter iter;
         gtk_list_store_append (p->trkstore, &iter);
         gtk_list_store_set (p->trkstore, &iter,
-                TRK_COL_DISC, disc,
+                TRK_COL_FILE, file,
                 TRK_COL_NUMBER, num,
+                TRK_COL_SUBTITLE, t->disc_title ? t->disc_title : "",
                 TRK_COL_TITLE, t->title ? t->title : "",
                 TRK_COL_ARTIST, t->artist ? t->artist : "",
+                TRK_COL_INDEX, ordered[i],
                 -1);
     }
     free (ordered);
@@ -564,10 +646,10 @@ _picker_update_tracks (mb_picker_t *p) {
 static void
 _picker_update_discs (mb_picker_t *p) {
     gtk_list_store_clear (p->discstore);
-    if (p->release_index < 0 || p->release_index >= p->job->result->num_releases) {
+    mb_release_t *rel = _picker_release (p);
+    if (!rel) {
         return;
     }
-    mb_release_t *rel = &p->job->result->releases[p->release_index];
 
     GtkTreeIter iter;
     if (rel->complete || rel->num_candidate_discs == 0) {
@@ -591,6 +673,94 @@ _picker_update_discs (mb_picker_t *p) {
     }
 }
 
+// writes the current values of a release back into its row of the release list
+static void
+_picker_refresh_release_row (mb_picker_t *p) {
+    mb_release_t *rel = _picker_release (p);
+    if (!rel) {
+        return;
+    }
+    GtkTreeIter iter;
+    if (!gtk_tree_model_iter_nth_child (GTK_TREE_MODEL (p->relstore), &iter, NULL, p->release_index)) {
+        return;
+    }
+
+    char date[128];
+    _slash (date, sizeof (date), rel->date, rel->country);
+    char label[256];
+    _slash (label, sizeof (label), rel->labels, rel->catalog);
+    char type[128];
+    _slash (type, sizeof (type), rel->type, rel->status);
+    char discs[16];
+    snprintf (discs, sizeof (discs), "%d", rel->totaldiscs);
+
+    gtk_list_store_set (p->relstore, &iter,
+            REL_COL_ARTIST, rel->artist ? rel->artist : "",
+            REL_COL_ALBUM, rel->title ? rel->title : "",
+            REL_COL_DATE, date,
+            REL_COL_LABEL, label,
+            REL_COL_MEDIA, rel->media ? rel->media : "",
+            REL_COL_DISCS, discs,
+            REL_COL_TYPE, type,
+            -1);
+}
+
+// selects the value in one of the fixed combos; a value which the server sent
+// but which isn't in the list is added to it, rather than dropped silently
+static void
+_picker_set_combo (GtkWidget *combo, const char *value) {
+    GtkTreeModel *model = gtk_combo_box_get_model (GTK_COMBO_BOX (combo));
+    int n = gtk_tree_model_iter_n_children (model, NULL);
+    int active = 0;
+    for (int i = 0; i < n; i++) {
+        GtkTreeIter iter;
+        char *text = NULL;
+        gtk_tree_model_iter_nth_child (model, &iter, NULL, i);
+        gtk_tree_model_get (model, &iter, 0, &text, -1);
+        int match = value && text && !strcmp (text, value);
+        g_free (text);
+        if (match) {
+            active = i;
+            break;
+        }
+    }
+    if (value && *value && active == 0) {
+        gtk_combo_box_text_append_text (GTK_COMBO_BOX_TEXT (combo), value);
+        active = n;
+    }
+    gtk_combo_box_set_active (GTK_COMBO_BOX (combo), active);
+}
+
+static void
+_picker_update_release_fields (mb_picker_t *p) {
+    mb_release_t *rel = _picker_release (p);
+    if (!rel) {
+        return;
+    }
+
+    p->updating = 1;
+    gtk_entry_set_text (GTK_ENTRY (p->fields[REL_FIELD_ARTIST]), rel->artist ? rel->artist : "");
+    gtk_entry_set_text (GTK_ENTRY (p->fields[REL_FIELD_ALBUM]), rel->title ? rel->title : "");
+    gtk_entry_set_text (GTK_ENTRY (p->fields[REL_FIELD_DATE]), rel->date ? rel->date : "");
+    gtk_entry_set_text (GTK_ENTRY (p->fields[REL_FIELD_ORIGINAL_DATE]), rel->original_date ? rel->original_date : "");
+    gtk_entry_set_text (GTK_ENTRY (p->fields[REL_FIELD_LABEL]), rel->labels ? rel->labels : "");
+    gtk_entry_set_text (GTK_ENTRY (p->fields[REL_FIELD_CATALOG]), rel->catalog ? rel->catalog : "");
+    gtk_entry_set_text (GTK_ENTRY (p->fields[REL_FIELD_BARCODE]), rel->barcode ? rel->barcode : "");
+    _picker_set_combo (p->fields[REL_FIELD_TYPE], rel->type);
+    _picker_set_combo (p->fields[REL_FIELD_STATUS], rel->status);
+    p->updating = 0;
+
+    char url[512];
+    if (rel->release_id && *rel->release_id) {
+        snprintf (url, sizeof (url), "%s/release/%s", mb_get_server (), rel->release_id);
+    }
+    else {
+        url[0] = 0;
+    }
+    gtk_link_button_set_uri (GTK_LINK_BUTTON (p->link), url);
+    gtk_widget_set_sensitive (p->link, url[0] != 0);
+}
+
 static void
 _picker_release_selected (GtkTreeSelection *selection, gpointer user_data) {
     mb_picker_t *p = user_data;
@@ -605,6 +775,7 @@ _picker_release_selected (GtkTreeSelection *selection, gpointer user_data) {
 
     _picker_update_discs (p);
     _picker_update_tracks (p);
+    _picker_update_release_fields (p);
 }
 
 static void
@@ -620,18 +791,203 @@ _picker_disc_changed (GtkComboBox *combo, gpointer user_data) {
     _picker_update_tracks (p);
 }
 
+// removes the spaces around the values of a ';' separated list, so that they
+// can be stored the way musicbrainz.c expects them
+static char *
+_normalize_labels (const char *text) {
+    GString *out = g_string_new (NULL);
+    const char *p = text;
+    while (p && *p) {
+        const char *end = strchr (p, ';');
+        const char *v = p;
+        const char *ve = end ? end : p + strlen (p);
+        while (v < ve && isspace ((unsigned char)*v)) {
+            v++;
+        }
+        while (ve > v && isspace ((unsigned char)ve[-1])) {
+            ve--;
+        }
+        if (ve > v) {
+            if (out->len) {
+                g_string_append_c (out, ';');
+            }
+            g_string_append_len (out, v, ve - v);
+        }
+        p = end ? end + 1 : NULL;
+    }
+    return g_string_free (out, FALSE);
+}
+
 static void
-_add_text_column (GtkTreeView *view, const char *title, int col, gboolean expands) {
+_picker_release_field_changed (GtkEditable *editable, gpointer user_data) {
+    mb_picker_t *p = user_data;
+    if (p->updating) {
+        return;
+    }
+    mb_release_t *rel = _picker_release (p);
+    if (!rel) {
+        return;
+    }
+
+    int field = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (editable), "mbfield"));
+    const char *text = gtk_entry_get_text (GTK_ENTRY (editable));
+    switch (field) {
+    case REL_FIELD_ARTIST:
+        _set_string (&rel->artist, text);
+        break;
+    case REL_FIELD_ALBUM:
+        _set_string (&rel->title, text);
+        break;
+    case REL_FIELD_DATE:
+        _set_string (&rel->date, text);
+        break;
+    case REL_FIELD_ORIGINAL_DATE:
+        _set_string (&rel->original_date, text);
+        break;
+    case REL_FIELD_LABEL:
+        {
+            char *labels = _normalize_labels (text);
+            _set_string (&rel->labels, labels);
+            free (labels);
+        }
+        break;
+    case REL_FIELD_CATALOG:
+        _set_string (&rel->catalog, text);
+        break;
+    case REL_FIELD_BARCODE:
+        _set_string (&rel->barcode, text);
+        break;
+    }
+    _picker_refresh_release_row (p);
+}
+
+static void
+_picker_release_combo_changed (GtkComboBox *combo, gpointer user_data) {
+    mb_picker_t *p = user_data;
+    if (p->updating) {
+        return;
+    }
+    mb_release_t *rel = _picker_release (p);
+    if (!rel) {
+        return;
+    }
+
+    int field = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (combo), "mbfield"));
+    char *text = gtk_combo_box_text_get_active_text (GTK_COMBO_BOX_TEXT (combo));
+    switch (field) {
+    case REL_FIELD_TYPE:
+        _set_string (&rel->type, text);
+        break;
+    case REL_FIELD_STATUS:
+        _set_string (&rel->status, text);
+        break;
+    }
+    g_free (text);
+    _picker_refresh_release_row (p);
+}
+
+static void
+_picker_track_edited (GtkCellRendererText *cell, gchar *path_str, gchar *new_text, gpointer user_data) {
+    mb_picker_t *p = user_data;
+    mb_release_t *rel = _picker_release (p);
+    int column = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (cell), "mbcolumn"));
+
+    GtkTreePath *path = gtk_tree_path_new_from_string (path_str);
+    GtkTreeIter iter;
+    if (!rel || !path || !gtk_tree_model_get_iter (GTK_TREE_MODEL (p->trkstore), &iter, path)) {
+        gtk_tree_path_free (path);
+        return;
+    }
+    int index = -1;
+    gtk_tree_model_get (GTK_TREE_MODEL (p->trkstore), &iter, TRK_COL_INDEX, &index, -1);
+    gtk_tree_path_free (path);
+
+    if (index < 0 || index >= rel->num_tracks) {
+        return;
+    }
+
+    if (column == TRK_COL_TITLE) {
+        _set_string (&rel->tracks[index].title, new_text);
+    }
+    else if (column == TRK_COL_ARTIST) {
+        _set_string (&rel->tracks[index].artist, new_text);
+    }
+    else if (column == TRK_COL_SUBTITLE) {
+        // the disc subtitle belongs to the whole disc
+        int discnumber = rel->tracks[index].discnumber;
+        for (int i = 0; i < rel->num_tracks; i++) {
+            if (rel->tracks[i].discnumber == discnumber) {
+                _set_string (&rel->tracks[i].disc_title, new_text);
+            }
+        }
+        // the other rows of the same disc display the same subtitle
+        GtkTreeModel *model = GTK_TREE_MODEL (p->trkstore);
+        GtkTreeIter row;
+        if (gtk_tree_model_get_iter_first (model, &row)) {
+            do {
+                int idx = -1;
+                gtk_tree_model_get (model, &row, TRK_COL_INDEX, &idx, -1);
+                if (idx >= 0 && idx < rel->num_tracks && rel->tracks[idx].discnumber == discnumber) {
+                    gtk_list_store_set (p->trkstore, &row, column, new_text, -1);
+                }
+            } while (gtk_tree_model_iter_next (model, &row));
+        }
+    }
+
+    gtk_list_store_set (p->trkstore, &iter, column, new_text, -1);
+}
+
+static gboolean
+_picker_link_activate (GtkLinkButton *button, gpointer user_data) {
+    const char *uri = gtk_link_button_get_uri (button);
+    if (uri && *uri) {
+        _open_url (uri);
+    }
+    return TRUE; // we opened it ourselves
+}
+
+static void
+_add_text_column (GtkTreeView *view, const char *title, int col, gboolean expands, gboolean editable,
+        GCallback edited, gpointer user_data) {
     GtkCellRenderer *renderer = gtk_cell_renderer_text_new ();
+    g_object_set (renderer, "editable", editable, NULL);
+    g_object_set_data (G_OBJECT (renderer), "mbcolumn", GINT_TO_POINTER (col));
+    if (editable) {
+        g_signal_connect (renderer, "edited", edited, user_data);
+    }
+
     GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes (title, renderer, "text", col, NULL);
     gtk_tree_view_column_set_resizable (column, TRUE);
-    gtk_tree_view_column_set_sizing (column, expands ? GTK_TREE_VIEW_COLUMN_AUTOSIZE : GTK_TREE_VIEW_COLUMN_FIXED);
     gtk_tree_view_column_set_min_width (column, 40);
+    gtk_tree_view_column_set_expand (column, expands);
     gtk_tree_view_append_column (view, column);
 }
 
-// shows the list of found releases, and the tracks of the selected one; takes
-// ownership of the job
+static GtkWidget *
+_add_field (GtkWidget *table, int left, int top, const char *title, GtkWidget *field, int id) {
+    GtkWidget *label = gtk_label_new (title);
+    gtk_misc_set_alignment (GTK_MISC (label), 1.0, 0.5);
+    gtk_table_attach (GTK_TABLE (table), label, left, left + 1, top, top + 1, GTK_FILL, 0, 0, 0);
+    gtk_table_attach (GTK_TABLE (table), field, left + 1, left + 2, top, top + 1, GTK_EXPAND | GTK_FILL, 0, 0, 0);
+    g_object_set_data (G_OBJECT (field), "mbfield", GINT_TO_POINTER (id));
+    return field;
+}
+
+static GtkWidget *
+_add_combo (GtkWidget *table, int left, int top, const char *title, const char **values, int id,
+        GCallback changed, gpointer user_data) {
+    GtkWidget *combo = gtk_combo_box_text_new ();
+    for (int i = 0; values[i]; i++) {
+        gtk_combo_box_text_append_text (GTK_COMBO_BOX_TEXT (combo), values[i]);
+    }
+    _add_field (table, left, top, title, combo, id);
+    g_signal_connect (combo, "changed", changed, user_data);
+    return combo;
+}
+
+// shows the found releases, their tracks, and the tags which are going to be
+// written; everything in it can be corrected before tagging, like in
+// foo_musicbrainz; takes ownership of the job
 static void
 _show_release_picker (mb_job_t *job) {
     mb_picker_t p;
@@ -644,7 +1000,7 @@ _show_release_picker (mb_job_t *job) {
             GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
             _("_Cancel"), GTK_RESPONSE_CANCEL, _("_Tag Files"), GTK_RESPONSE_OK, NULL);
     gtk_dialog_set_default_response (GTK_DIALOG (p.dialog), GTK_RESPONSE_OK);
-    gtk_window_set_default_size (GTK_WINDOW (p.dialog), 760, 520);
+    gtk_window_set_default_size (GTK_WINDOW (p.dialog), 900, 640);
 
     GtkWidget *content = gtk_dialog_get_content_area (GTK_DIALOG (p.dialog));
     gtk_container_set_border_width (GTK_CONTAINER (content), 6);
@@ -652,7 +1008,7 @@ _show_release_picker (mb_job_t *job) {
     GtkWidget *vbox = gtk_vbox_new (FALSE, 6);
     gtk_box_pack_start (GTK_BOX (content), vbox, TRUE, TRUE, 0);
 
-    // releases
+    // the list of the found releases
     p.relstore = gtk_list_store_new (REL_NUM_COLS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
             G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     GtkWidget *relscroll = gtk_scrolled_window_new (NULL, NULL);
@@ -665,15 +1021,34 @@ _show_release_picker (mb_job_t *job) {
     gtk_tree_selection_set_mode (gtk_tree_view_get_selection (GTK_TREE_VIEW (relview)), GTK_SELECTION_BROWSE);
     gtk_container_add (GTK_CONTAINER (relscroll), relview);
 
-    _add_text_column (GTK_TREE_VIEW (relview), _("Artist"), REL_COL_ARTIST, FALSE);
-    _add_text_column (GTK_TREE_VIEW (relview), _("Album"), REL_COL_ALBUM, FALSE);
-    _add_text_column (GTK_TREE_VIEW (relview), _("Date"), REL_COL_DATE, FALSE);
-    _add_text_column (GTK_TREE_VIEW (relview), _("Label / Catalog"), REL_COL_LABEL, FALSE);
-    _add_text_column (GTK_TREE_VIEW (relview), _("Media"), REL_COL_MEDIA, FALSE);
-    _add_text_column (GTK_TREE_VIEW (relview), _("Discs"), REL_COL_DISCS, FALSE);
-    _add_text_column (GTK_TREE_VIEW (relview), _("Type / Status"), REL_COL_TYPE, FALSE);
+    for (int i = 0; i < job->result->num_releases; i++) {
+        GtkTreeIter iter;
+        gtk_list_store_append (p.relstore, &iter);
+    }
 
-    // disc selector
+    // the release info, which is written to the files
+    GtkWidget *table = gtk_table_new (5, 4, FALSE);
+    gtk_table_set_col_spacings (GTK_TABLE (table), 6);
+    gtk_table_set_row_spacings (GTK_TABLE (table), 4);
+    gtk_box_pack_start (GTK_BOX (vbox), table, FALSE, FALSE, 0);
+
+    p.fields[REL_FIELD_ARTIST] = _add_field (table, 0, 0, _("Album artist:"), gtk_entry_new (), REL_FIELD_ARTIST);
+    p.fields[REL_FIELD_ALBUM] = _add_field (table, 2, 0, _("Album:"), gtk_entry_new (), REL_FIELD_ALBUM);
+    p.fields[REL_FIELD_DATE] = _add_field (table, 0, 1, _("Date:"), gtk_entry_new (), REL_FIELD_DATE);
+    p.fields[REL_FIELD_ORIGINAL_DATE] = _add_field (table, 2, 1, _("Original date:"), gtk_entry_new (), REL_FIELD_ORIGINAL_DATE);
+    p.fields[REL_FIELD_LABEL] = _add_field (table, 0, 2, _("Label(s):"), gtk_entry_new (), REL_FIELD_LABEL);
+    p.fields[REL_FIELD_CATALOG] = _add_field (table, 2, 2, _("Catalog #:"), gtk_entry_new (), REL_FIELD_CATALOG);
+    p.fields[REL_FIELD_BARCODE] = _add_field (table, 0, 3, _("Barcode:"), gtk_entry_new (), REL_FIELD_BARCODE);
+    p.fields[REL_FIELD_TYPE] = _add_combo (table, 2, 3, _("Type:"), release_group_types, REL_FIELD_TYPE,
+            G_CALLBACK (_picker_release_combo_changed), &p);
+    p.fields[REL_FIELD_STATUS] = _add_combo (table, 0, 4, _("Status:"), release_statuses, REL_FIELD_STATUS,
+            G_CALLBACK (_picker_release_combo_changed), &p);
+
+    for (int i = 0; i < REL_FIELD_TYPE; i++) {
+        g_signal_connect (p.fields[i], "changed", G_CALLBACK (_picker_release_field_changed), &p);
+    }
+
+    // the disc to apply, and the release page on the MusicBrainz server
     GtkWidget *hbox = gtk_hbox_new (FALSE, 6);
     gtk_box_pack_start (GTK_BOX (vbox), hbox, FALSE, FALSE, 0);
     GtkWidget *disclabel = gtk_label_new (_("Apply:"));
@@ -686,8 +1061,13 @@ _show_release_picker (mb_job_t *job) {
     gtk_box_pack_start (GTK_BOX (hbox), p.disccombo, FALSE, FALSE, 0);
     g_signal_connect (p.disccombo, "changed", G_CALLBACK (_picker_disc_changed), &p);
 
-    // tracks of the selected release
-    p.trkstore = gtk_list_store_new (TRK_NUM_COLS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    p.link = gtk_link_button_new_with_label ("", _("MusicBrainz release page"));
+    gtk_box_pack_end (GTK_BOX (hbox), p.link, FALSE, FALSE, 0);
+    g_signal_connect (p.link, "activate-link", G_CALLBACK (_picker_link_activate), &p);
+
+    // the tracks of the selected release, next to the files they are applied to
+    p.trkstore = gtk_list_store_new (TRK_NUM_COLS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING,
+            G_TYPE_STRING, G_TYPE_INT);
     GtkWidget *trkscroll = gtk_scrolled_window_new (NULL, NULL);
     gtk_scrolled_window_set_shadow_type (GTK_SCROLLED_WINDOW (trkscroll), GTK_SHADOW_IN);
     gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (trkscroll), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -696,37 +1076,33 @@ _show_release_picker (mb_job_t *job) {
     GtkWidget *trkview = gtk_tree_view_new_with_model (GTK_TREE_MODEL (p.trkstore));
     gtk_tree_view_set_headers_visible (GTK_TREE_VIEW (trkview), TRUE);
     gtk_container_add (GTK_CONTAINER (trkscroll), trkview);
-    _add_text_column (GTK_TREE_VIEW (trkview), _("Disc"), TRK_COL_DISC, FALSE);
-    _add_text_column (GTK_TREE_VIEW (trkview), _("#"), TRK_COL_NUMBER, FALSE);
-    _add_text_column (GTK_TREE_VIEW (trkview), _("Title"), TRK_COL_TITLE, TRUE);
-    _add_text_column (GTK_TREE_VIEW (trkview), _("Artist"), TRK_COL_ARTIST, TRUE);
+    _add_text_column (GTK_TREE_VIEW (trkview), _("File"), TRK_COL_FILE, TRUE, FALSE, NULL, NULL);
+    _add_text_column (GTK_TREE_VIEW (trkview), _("Track"), TRK_COL_NUMBER, FALSE, FALSE, NULL, NULL);
+    _add_text_column (GTK_TREE_VIEW (trkview), _("Disc subtitle"), TRK_COL_SUBTITLE, FALSE, TRUE,
+            G_CALLBACK (_picker_track_edited), &p);
+    _add_text_column (GTK_TREE_VIEW (trkview), _("Title"), TRK_COL_TITLE, TRUE, TRUE,
+            G_CALLBACK (_picker_track_edited), &p);
+    _add_text_column (GTK_TREE_VIEW (trkview), _("Artist"), TRK_COL_ARTIST, TRUE, TRUE,
+            G_CALLBACK (_picker_track_edited), &p);
 
+    // the columns are filled through _picker_refresh_release_row, so that the
+    // same code is used for the initial fill and for the edits
     for (int i = 0; i < job->result->num_releases; i++) {
-        mb_release_t *rel = &job->result->releases[i];
-        char date[128];
-        _slash (date, sizeof (date), rel->date ? rel->date : rel->original_date, rel->country);
-        char label[256];
-        _slash (label, sizeof (label), rel->labels, rel->catalog);
-        char type[128];
-        _slash (type, sizeof (type), rel->type, rel->status);
-        char discs[16];
-        snprintf (discs, sizeof (discs), "%d", rel->totaldiscs);
-
-        GtkTreeIter iter;
-        gtk_list_store_append (p.relstore, &iter);
-        gtk_list_store_set (p.relstore, &iter,
-                REL_COL_ARTIST, rel->artist ? rel->artist : "",
-                REL_COL_ALBUM, rel->title ? rel->title : "",
-                REL_COL_DATE, date,
-                REL_COL_LABEL, label,
-                REL_COL_MEDIA, rel->media ? rel->media : "",
-                REL_COL_DISCS, discs,
-                REL_COL_TYPE, type,
-                -1);
+        p.release_index = i;
+        _picker_refresh_release_row (&p);
     }
+    p.release_index = -1;
 
     g_signal_connect (gtk_tree_view_get_selection (GTK_TREE_VIEW (relview)), "changed",
             G_CALLBACK (_picker_release_selected), &p);
+
+    _add_text_column (GTK_TREE_VIEW (relview), _("Artist"), REL_COL_ARTIST, FALSE, FALSE, NULL, NULL);
+    _add_text_column (GTK_TREE_VIEW (relview), _("Album"), REL_COL_ALBUM, TRUE, FALSE, NULL, NULL);
+    _add_text_column (GTK_TREE_VIEW (relview), _("Date / Country"), REL_COL_DATE, FALSE, FALSE, NULL, NULL);
+    _add_text_column (GTK_TREE_VIEW (relview), _("Label(s) / Catalog #"), REL_COL_LABEL, TRUE, FALSE, NULL, NULL);
+    _add_text_column (GTK_TREE_VIEW (relview), _("Media"), REL_COL_MEDIA, FALSE, FALSE, NULL, NULL);
+    _add_text_column (GTK_TREE_VIEW (relview), _("Discs"), REL_COL_DISCS, FALSE, FALSE, NULL, NULL);
+    _add_text_column (GTK_TREE_VIEW (relview), _("Type / Status"), REL_COL_TYPE, FALSE, FALSE, NULL, NULL);
 
     gtk_widget_show_all (p.dialog);
 
@@ -753,7 +1129,6 @@ _show_release_picker (mb_job_t *job) {
 
     _write_tags (job);
 }
-
 #pragma mark - lookup dialogs
 
 static char *
@@ -793,6 +1168,25 @@ _ask_for_text (const char *title, const char *label_text, const char *initial) {
     return text;
 }
 
+typedef struct {
+    GtkWidget *entry;
+    char *raw; // the album name as it is tagged
+    char *stripped; // with the edition info removed, which finds more matches
+    int swapping;
+} mb_edition_t;
+
+static void
+_toggle_edition (GtkToggleButton *button, gpointer user_data) {
+    mb_edition_t *e = user_data;
+    if (e->swapping) {
+        return;
+    }
+    e->swapping = 1;
+    gtk_entry_set_text (GTK_ENTRY (e->entry),
+            gtk_toggle_button_get_active (button) ? e->raw : e->stripped);
+    e->swapping = 0;
+}
+
 // asks for the artist and album, prefilled from the tags of the tracks, and
 // starts the search; takes ownership of the job
 static void
@@ -823,10 +1217,27 @@ _ask_for_artist_album (mb_job_t *job) {
     GtkWidget *albumlabel = gtk_label_new (_("Album:"));
     gtk_table_attach (GTK_TABLE (table), albumlabel, 0, 1, 1, 2, GTK_FILL, 0, 0, 0);
     GtkWidget *album = gtk_entry_new ();
-    if (job->album) {
-        gtk_entry_set_text (GTK_ENTRY (album), job->album);
+
+    // searching for "Album [Deluxe Edition]" usually finds nothing, so the
+    // edition descriptors are stripped from the prefilled name, with a way to
+    // put them back
+    mb_edition_t edition;
+    memset (&edition, 0, sizeof (edition));
+    edition.entry = album;
+    edition.raw = job->album ? strdup (job->album) : NULL;
+    edition.stripped = mb_strip_album_edition (job->album);
+    if (!edition.stripped) {
+        edition.stripped = edition.raw ? strdup (edition.raw) : NULL;
     }
+    int strips_edition = edition.raw && edition.stripped && strcmp (edition.raw, edition.stripped);
+    gtk_entry_set_text (GTK_ENTRY (album), strips_edition ? edition.stripped : (edition.raw ? edition.raw : ""));
     gtk_table_attach (GTK_TABLE (table), album, 1, 2, 1, 2, GTK_EXPAND | GTK_FILL, 0, 0, 0);
+
+    if (strips_edition) {
+        GtkWidget *keep = gtk_check_button_new_with_mnemonic (_("_Keep the edition info in the album name"));
+        gtk_table_attach (GTK_TABLE (table), keep, 1, 2, 2, 3, GTK_FILL, 0, 0, 0);
+        g_signal_connect (keep, "toggled", G_CALLBACK (_toggle_edition), &edition);
+    }
 
     gtk_widget_show_all (dlg);
 
@@ -841,10 +1252,14 @@ _ask_for_artist_album (mb_job_t *job) {
             job->album = strdup (album_text);
             gtk_widget_destroy (dlg);
             _start_query (job, _("Querying MusicBrainz for releases..."));
+            free (edition.raw);
+            free (edition.stripped);
             return;
         }
     }
     gtk_widget_destroy (dlg);
+    free (edition.raw);
+    free (edition.stripped);
     _job_free (job);
 }
 
@@ -898,14 +1313,16 @@ _action_mb_by_release_id (struct DB_plugin_action_s *action, ddb_action_context_
         return 0;
     }
     job->mbid = mb_find_common_mbid (job->tracks, job->numtracks, "MUSICBRAINZ_ALBUMID");
-    char *mbid = _ask_for_text (_("MusicBrainz Release ID"), _("MusicBrainz Release ID:"), job->mbid);
-    if (!mbid) {
+    char *text = _ask_for_text (_("MusicBrainz Release ID"), _("MusicBrainz Release ID:"), job->mbid);
+    if (!text) {
         _job_free (job);
         return 0;
     }
     free (job->mbid);
-    job->mbid = mbid;
-    if (!mb_is_uuid (mbid)) {
+    // a release page URL copied from a browser is accepted too
+    job->mbid = mb_extract_mbid (text);
+    free (text);
+    if (!job->mbid) {
         _show_error (_("This is not a valid MusicBrainz ID."));
         _job_free (job);
         return 0;
@@ -921,14 +1338,15 @@ _action_mb_by_release_group_id (struct DB_plugin_action_s *action, ddb_action_co
         return 0;
     }
     job->mbid = mb_find_common_mbid (job->tracks, job->numtracks, "MUSICBRAINZ_RELEASEGROUPID");
-    char *mbid = _ask_for_text (_("MusicBrainz Release Group ID"), _("MusicBrainz Release Group ID:"), job->mbid);
-    if (!mbid) {
+    char *text = _ask_for_text (_("MusicBrainz Release Group ID"), _("MusicBrainz Release Group ID:"), job->mbid);
+    if (!text) {
         _job_free (job);
         return 0;
     }
     free (job->mbid);
-    job->mbid = mbid;
-    if (!mb_is_uuid (mbid)) {
+    job->mbid = mb_extract_mbid (text);
+    free (text);
+    if (!job->mbid) {
         _show_error (_("This is not a valid MusicBrainz ID."));
         _job_free (job);
         return 0;
@@ -951,10 +1369,10 @@ _action_mb_add_toc (struct DB_plugin_action_s *action, ddb_action_context_t ctx)
         return 0;
     }
 
-    if (numtracks > 99 || !mb_check_toc (tracks, numtracks)) {
-        _show_error (_("Only files with a sample rate of 44100 Hz can be used to submit a TOC "
-                "to MusicBrainz. The length of every file must be a whole number of CD sectors, "
-                "and no more than 99 files may be selected."));
+    if (numtracks > 99 || !mb_check_toc_submission (tracks, numtracks)) {
+        _show_error (_("Only lossless files with a sample rate of 44100 Hz can be used to submit "
+                "a TOC to MusicBrainz. The length of every file must be a whole number of CD "
+                "sectors, and no more than 99 files may be selected."));
     }
     else {
         char *url = mb_make_toc_url (tracks, numtracks);
@@ -972,7 +1390,126 @@ _action_mb_add_toc (struct DB_plugin_action_s *action, ddb_action_context_t ctx)
     return 0;
 }
 
+#pragma mark - preferences
+
+// foo_musicbrainz keeps its settings in the foobar preferences; deadbeef has
+// no way for a gui plugin to add a page to the preferences window, so they are
+// edited from the Tagging/MusicBrainz submenu instead
+static const char *const mb_setting_keys[] = {
+    "musicbrainz.write_mbids",
+    "musicbrainz.write_track_mbids",
+    "musicbrainz.write_album_artist",
+    "musicbrainz.write_label_info",
+    "musicbrainz.write_album_type",
+    "musicbrainz.write_album_status",
+    "musicbrainz.write_country",
+    "musicbrainz.write_media",
+    "musicbrainz.write_isrc",
+    "musicbrainz.write_asin",
+    "musicbrainz.short_date",
+    "musicbrainz.use_original_date",
+};
+
+static const int mb_setting_defaults[] = {
+    1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0,
+};
+
+#define MB_NUM_SETTINGS ((int)(sizeof (mb_setting_keys) / sizeof (mb_setting_keys[0])))
+
+static void
+_show_preferences (void) {
+    GtkWidget *dlg = gtk_dialog_new_with_buttons (_("MusicBrainz"),
+            mainwin ? GTK_WINDOW (mainwin) : NULL,
+            GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+            _("_Cancel"), GTK_RESPONSE_CANCEL, _("_OK"), GTK_RESPONSE_OK, NULL);
+    gtk_dialog_set_default_response (GTK_DIALOG (dlg), GTK_RESPONSE_OK);
+
+    GtkWidget *content = gtk_dialog_get_content_area (GTK_DIALOG (dlg));
+    gtk_container_set_border_width (GTK_CONTAINER (content), 6);
+
+    GtkWidget *vbox = gtk_vbox_new (FALSE, 6);
+    gtk_box_pack_start (GTK_BOX (content), vbox, TRUE, TRUE, 0);
+
+    GtkWidget *table = gtk_table_new (MB_NUM_SETTINGS / 2 + 2, 2, FALSE);
+    gtk_table_set_col_spacings (GTK_TABLE (table), 12);
+    gtk_table_set_row_spacings (GTK_TABLE (table), 4);
+    gtk_box_pack_start (GTK_BOX (vbox), table, TRUE, TRUE, 0);
+
+    GtkWidget *server_label = gtk_label_new (_("Server:"));
+    gtk_misc_set_alignment (GTK_MISC (server_label), 0.0, 0.5);
+    gtk_table_attach (GTK_TABLE (table), server_label, 0, 2, 0, 1, GTK_FILL, 0, 0, 0);
+
+    GtkWidget *server = gtk_entry_new ();
+    char value[512];
+    deadbeef->conf_get_str ("musicbrainz.server", "", value, sizeof (value));
+    gtk_entry_set_text (GTK_ENTRY (server), value);
+    gtk_table_attach (GTK_TABLE (table), server, 0, 2, 1, 2, GTK_EXPAND | GTK_FILL, 0, 0, 0);
+
+    GtkWidget *server_hint = gtk_label_new (_("Leave empty to use https://musicbrainz.org"));
+    gtk_misc_set_alignment (GTK_MISC (server_hint), 0.0, 0.5);
+    gtk_widget_set_sensitive (server_hint, FALSE);
+    gtk_table_attach (GTK_TABLE (table), server_hint, 0, 2, 2, 3, GTK_FILL, 0, 0, 0);
+
+    GtkWidget *max_label = gtk_label_new (_("Maximum releases to fetch:"));
+    gtk_misc_set_alignment (GTK_MISC (max_label), 0.0, 0.5);
+    gtk_table_attach (GTK_TABLE (table), max_label, 0, 1, 3, 4, GTK_FILL, 0, 0, 0);
+
+    GtkWidget *max = gtk_spin_button_new_with_range (1, 30, 1);
+    gtk_spin_button_set_value (GTK_SPIN_BUTTON (max), deadbeef->conf_get_int ("musicbrainz.max_releases", 30));
+    gtk_table_attach (GTK_TABLE (table), max, 1, 2, 3, 4, GTK_FILL, 0, 0, 0);
+
+    const char *titles[MB_NUM_SETTINGS] = {
+        _("Write the _MusicBrainz IDs"),
+        _("Write the _recording and release track IDs"),
+        _("Always write the al_bum artist"),
+        _("Write the lab_el, catalog number and barcode"),
+        _("Write the rele_ase type"),
+        _("Write the release _status"),
+        _("Write the release co_untry"),
+        _("Write the _media format"),
+        _("Write the _ISRCs"),
+        _("Write the A_SIN"),
+        _("Write only the _year of the release date"),
+        _("Use the _original release date instead"),
+    };
+
+    GtkWidget *checks[MB_NUM_SETTINGS];
+    for (int i = 0; i < MB_NUM_SETTINGS; i++) {
+        checks[i] = gtk_check_button_new_with_mnemonic (titles[i]);
+        gtk_toggle_button_set_active (GTK_TOGGLE_BUTTON (checks[i]),
+                deadbeef->conf_get_int (mb_setting_keys[i], mb_setting_defaults[i]));
+        gtk_table_attach (GTK_TABLE (table), checks[i], i % 2, i % 2 + 1, 4 + i / 2, 5 + i / 2,
+                GTK_EXPAND | GTK_FILL, 0, 0, 0);
+    }
+
+    gtk_widget_show_all (dlg);
+
+    if (gtk_dialog_run (GTK_DIALOG (dlg)) == GTK_RESPONSE_OK) {
+        const char *text = gtk_entry_get_text (GTK_ENTRY (server));
+        deadbeef->conf_set_str ("musicbrainz.server", text ? text : "");
+        deadbeef->conf_set_int ("musicbrainz.max_releases", (int)gtk_spin_button_get_value (GTK_SPIN_BUTTON (max)));
+        for (int i = 0; i < MB_NUM_SETTINGS; i++) {
+            deadbeef->conf_set_int (mb_setting_keys[i], gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (checks[i])));
+        }
+        deadbeef->conf_save ();
+    }
+    gtk_widget_destroy (dlg);
+}
+
+static int
+_action_mb_preferences (struct DB_plugin_action_s *action, ddb_action_context_t ctx) {
+    _show_preferences ();
+    return 0;
+}
+
 // the definitions; the next pointers are wired up in mbtagger_link_actions
+static DB_plugin_action_t action_mb_preferences = {
+    .title = "Tagging/MusicBrainz/Preferences",
+    .name = "mb_preferences",
+    .flags = DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU,
+    .callback2 = _action_mb_preferences,
+};
+
 static DB_plugin_action_t action_mb_add_toc = {
     .title = "Tagging/MusicBrainz/Add TOC to MusicBrainz",
     .name = "mb_add_toc",
@@ -1010,6 +1547,14 @@ static DB_plugin_action_t action_mb_by_toc = {
 
 DB_plugin_action_t *
 mbtagger_get_actions (DB_playItem_t *it) {
+    // only one query at a time, so the busy ones are taken out of the menu
+    int flags = DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU | (_job ? DB_ACTION_DISABLED : 0);
+    action_mb_by_toc.flags = flags;
+    action_mb_by_artist_album.flags = flags;
+    action_mb_by_release_id.flags = flags;
+    action_mb_by_release_group_id.flags = flags;
+    action_mb_add_toc.flags = flags;
+    action_mb_preferences.flags = DB_ACTION_MULTIPLE_TRACKS | DB_ACTION_ADD_MENU;
     return &action_mb_by_toc;
 }
 
@@ -1019,5 +1564,6 @@ mbtagger_link_actions (DB_plugin_action_t *gtkui_actions) {
     action_mb_by_artist_album.next = &action_mb_by_release_id;
     action_mb_by_release_id.next = &action_mb_by_release_group_id;
     action_mb_by_release_group_id.next = &action_mb_add_toc;
-    action_mb_add_toc.next = gtkui_actions;
+    action_mb_add_toc.next = &action_mb_preferences;
+    action_mb_preferences.next = gtkui_actions;
 }

@@ -51,6 +51,8 @@
 #define MB_MIN_REQUEST_INTERVAL_MS 1000
 #define MB_CACHE_SIZE 64
 #define MB_MAX_CANDIDATES 30
+#define MB_MAX_ATTEMPTS 3
+#define MB_RETRY_DELAY_MS 1500
 
 #define MB_ID_LEN 36
 
@@ -98,9 +100,11 @@ mb_append_value (char *base, const char *value) {
     return mb_strdup_append (base, base ? ";" : "", value);
 }
 
-int
-mb_is_uuid (const char *id) {
-    if (!id || strlen (id) != MB_ID_LEN) {
+// 1 if a MusicBrainz ID starts at the beginning of the string, which may be
+// longer than the ID itself
+static int
+mb_is_uuid_at (const char *id) {
+    if (!id || strlen (id) < MB_ID_LEN) {
         return 0;
     }
     for (int i = 0; i < MB_ID_LEN; i++) {
@@ -121,6 +125,31 @@ mb_is_uuid (const char *id) {
         }
     }
     return 1;
+}
+
+int
+mb_is_uuid (const char *id) {
+    return mb_is_uuid_at (id) && id[MB_ID_LEN] == 0;
+}
+
+char *
+mb_extract_mbid (const char *text) {
+    if (!text) {
+        return NULL;
+    }
+    // pasting the whole release page URL from a browser is common, so pick the
+    // first MusicBrainz ID out of the text instead of rejecting it
+    for (const char *p = text; *p; p++) {
+        if (mb_is_uuid_at (p)) {
+            char *id = malloc (MB_ID_LEN + 1);
+            if (id) {
+                memcpy (id, p, MB_ID_LEN);
+                id[MB_ID_LEN] = 0;
+            }
+            return id;
+        }
+    }
+    return NULL;
 }
 
 #pragma mark - url
@@ -169,7 +198,7 @@ static void
 sha1_block (uint32_t state[5], const uint8_t buf[64]) {
     uint32_t w[80];
     for (int i = 0; i < 16; i++) {
-        w[i] = (buf[i * 4] << 24) | (buf[i * 4 + 1] << 16) | (buf[i * 4 + 2] << 8) | buf[i * 4 + 3];
+        w[i] = ((uint32_t)buf[i * 4] << 24) | ((uint32_t)buf[i * 4 + 1] << 16) | ((uint32_t)buf[i * 4 + 2] << 8) | buf[i * 4 + 3];
     }
     for (int i = 16; i < 80; i++) {
         w[i] = sha1_rol (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], 1);
@@ -411,15 +440,48 @@ mb_wait_rate_limit (const volatile int *abort) {
     return !(abort && *abort);
 }
 
-// downloads the url, returns a null terminated buffer with the response, or NULL
 static char *
-mb_fetch (const char *url, const volatile int *abort) {
+mb_try_fetch (const char *url, const volatile int *abort);
+
+// downloads the url, returns a null terminated buffer with the response, or
+// NULL and sets *failed. A failed request is not the same as a valid but empty
+// result -- the musicbrainz search server answers 503 every now and then
+static char *
+mb_fetch (const char *url, const volatile int *abort, int *failed) {
+    if (failed) {
+        *failed = 0;
+    }
+
     char *cached = mb_cache_get (url);
     if (cached) {
         trace ("musicbrainz: cache hit %s\n", url);
         return cached;
     }
 
+    for (int attempt = 0; attempt < MB_MAX_ATTEMPTS; attempt++) {
+        char *data = mb_try_fetch (url, abort);
+        if (data) {
+            return data;
+        }
+        if (abort && *abort) {
+            return NULL;
+        }
+        if (attempt + 1 < MB_MAX_ATTEMPTS) {
+            // the server answers "currently busy" every now and then, and
+            // gets happier the slower we come back at it
+            trace ("musicbrainz: retrying %s\n", url);
+            mb_sleep_ms (MB_RETRY_DELAY_MS * (attempt + 1));
+        }
+    }
+
+    if (failed) {
+        *failed = 1;
+    }
+    return NULL;
+}
+
+static char *
+mb_try_fetch (const char *url, const volatile int *abort) {
     if (!mb_wait_rate_limit (abort)) {
         return NULL;
     }
@@ -657,8 +719,11 @@ mb_parse_release (json_t *json_release, int numtracks, const char *discid, mb_re
         char *disc_title = mb_json_str (media, "title");
         int discnumber = mb_json_int (media, "position", 1);
 
+        // NOTE: this loop needs its own index variable -- reusing the index of
+        // the enclosing media loop would skip every media after the first one
         json_t *track;
-        json_array_foreach (tracks, index, track) {
+        size_t track_index;
+        json_array_foreach (tracks, track_index, track) {
             mb_track_t t;
             memset (&t, 0, sizeof (t));
             mb_parse_artist_credit (track, &t.artist, &t.artist_ids);
@@ -786,13 +851,17 @@ mb_compare_releases (const void *a, const void *b) {
 
 static mb_result_t *
 mb_result_new (void) {
-    return calloc (1, sizeof (mb_result_t));
+    mb_result_t *result = calloc (1, sizeof (mb_result_t));
+    if (!result) {
+        deadbeef->log ("musicbrainz: out of memory\n");
+    }
+    return result;
 }
 
 // appends a parsed release to the result
 static void
 mb_result_add (mb_result_t *result, mb_release_t *release) {
-    if (result->num_releases >= MB_MAX_CANDIDATES) {
+    if (!result || result->num_releases >= MB_MAX_CANDIDATES) {
         mb_free_release (release);
         return;
     }
@@ -809,6 +878,8 @@ mb_result_add (mb_result_t *result, mb_release_t *release) {
 
 const char *
 mb_get_server (void) {
+    // NOTE: only one query runs at a time, and the gui reads the server outside
+    // of the worker thread, so the static buffer below is never used concurrently
     static char server[256];
     deadbeef->conf_get_str ("musicbrainz.server", MB_DEFAULT_SERVER, server, sizeof (server));
     size_t len = strlen (server);
@@ -841,7 +912,9 @@ mb_check_server_error (json_t *root, mb_result_t *result) {
     json_t *error = json_object_get (root, "error");
     if (error && json_is_string (error)) {
         deadbeef->log ("musicbrainz: server error: %s\n", json_string_value (error));
-        result->failed = 1;
+        if (result) {
+            result->failed = 1;
+        }
         return 0;
     }
     return 1;
@@ -850,6 +923,9 @@ mb_check_server_error (json_t *root, mb_result_t *result) {
 // performs a lookup by entity/id, and adds the resulting release to the result
 static void
 mb_lookup_release_ids (mb_result_t *result, json_t *ids, int numtracks, const volatile int *abort) {
+    if (!result) {
+        return;
+    }
     size_t count = json_array_size (ids);
     int max = mb_max_candidates ();
     for (size_t i = 0; i < count && result->num_releases < max; i++) {
@@ -865,8 +941,12 @@ mb_lookup_release_ids (mb_result_t *result, json_t *ids, int numtracks, const vo
         char url[512];
         snprintf (url, sizeof (url), "%s/ws/2/release/%s?fmt=json&inc=%s", mb_get_server (), id, MB_LOOKUP_INC);
 
-        char *data = mb_fetch (url, abort);
+        int req_failed = 0;
+        char *data = mb_fetch (url, abort, &req_failed);
         if (!data) {
+            if (req_failed) {
+                result->failed = 1;
+            }
             continue;
         }
         json_error_t error;
@@ -922,6 +1002,9 @@ mb_filtered_release_ids (json_t *releases, int numtracks) {
 mb_result_t *
 mb_lookup_discid (DB_playItem_t **tracks, int numtracks, const volatile int *abort) {
     mb_result_t *result = mb_result_new ();
+    if (!result) {
+        return NULL;
+    }
     char *discid = mb_make_discid (tracks, numtracks, NULL);
     if (!discid) {
         return result;
@@ -930,8 +1013,10 @@ mb_lookup_discid (DB_playItem_t **tracks, int numtracks, const volatile int *abo
     char url[512];
     snprintf (url, sizeof (url), "%s/ws/2/discid/%s?fmt=json&cdstubs=no&inc=%s", mb_get_server (), discid, MB_LOOKUP_INC);
 
-    char *data = mb_fetch (url, abort);
+    int req_failed = 0;
+    char *data = mb_fetch (url, abort, &req_failed);
     if (!data) {
+        result->failed = req_failed;
         free (discid);
         return result;
     }
@@ -970,24 +1055,43 @@ mb_lookup_discid (DB_playItem_t **tracks, int numtracks, const volatile int *abo
 mb_result_t *
 mb_search (const char *artist, const char *album, int numtracks, const volatile int *abort) {
     mb_result_t *result = mb_result_new ();
-    char query[4096];
+    if (!result) {
+        return NULL;
+    }
+
+    // the query is built dynamically, because artist and album names come from
+    // the tags and can be arbitrarily long
+    int qlen = snprintf (NULL, 0, album && *album ? "artist:\"%s\" AND release:\"%s\"" : "artist:\"%s\"",
+            artist ? artist : "", album ? album : "");
+    char *query = malloc (qlen + 1);
+    if (!query) {
+        return result;
+    }
     if (album && *album) {
-        snprintf (query, sizeof (query), "artist:\"%s\" AND release:\"%s\"", artist ? artist : "", album);
+        snprintf (query, qlen + 1, "artist:\"%s\" AND release:\"%s\"", artist ? artist : "", album);
     }
     else {
-        snprintf (query, sizeof (query), "artist:\"%s\"", artist ? artist : "");
+        snprintf (query, qlen + 1, "artist:\"%s\"", artist ? artist : "");
     }
     char *enc_query = mb_url_encode (query);
+    free (query);
     if (!enc_query) {
         return result;
     }
 
-    char url[4608];
-    snprintf (url, sizeof (url), "%s/ws/2/release?fmt=json&limit=100&query=%s", mb_get_server (), enc_query);
+    char *url = malloc (strlen (mb_get_server ()) + strlen (enc_query) + 64);
+    if (!url) {
+        free (enc_query);
+        return result;
+    }
+    sprintf (url, "%s/ws/2/release?fmt=json&limit=100&query=%s", mb_get_server (), enc_query);
     free (enc_query);
 
-    char *data = mb_fetch (url, abort);
+    int req_failed = 0;
+    char *data = mb_fetch (url, abort, &req_failed);
+    free (url);
     if (!data) {
+        result->failed = req_failed;
         return result;
     }
     json_error_t error;
@@ -1013,6 +1117,9 @@ mb_search (const char *artist, const char *album, int numtracks, const volatile 
 mb_result_t *
 mb_lookup_mbid (const char *entity, const char *mbid, int numtracks, const volatile int *abort) {
     mb_result_t *result = mb_result_new ();
+    if (!result) {
+        return NULL;
+    }
     if (!mb_is_uuid (mbid)) {
         return result;
     }
@@ -1025,8 +1132,10 @@ mb_lookup_mbid (const char *entity, const char *mbid, int numtracks, const volat
         snprintf (url, sizeof (url), "%s/ws/2/release/%s?fmt=json&inc=%s", mb_get_server (), mbid, MB_LOOKUP_INC);
     }
 
-    char *data = mb_fetch (url, abort);
+    int req_failed = 0;
+    char *data = mb_fetch (url, abort, &req_failed);
     if (!data) {
+        result->failed = req_failed;
         return result;
     }
     json_error_t error;
@@ -1038,18 +1147,11 @@ mb_lookup_mbid (const char *entity, const char *mbid, int numtracks, const volat
     }
 
     if (!strcmp (entity, "release-group")) {
-        json_t *ids = json_array ();
-        json_t *releases = json_object_get (json_root, "releases");
-        if (json_is_array (releases)) {
-            size_t index;
-            json_t *release;
-            json_array_foreach (releases, index, release) {
-                const char *id = json_string_value (json_object_get (release, "id"));
-                if (id) {
-                    json_array_append_new (ids, json_string (id));
-                }
-            }
-        }
+        // a release group can hold dozens of releases, and every one of them
+        // costs a request of its own at one request per second, so only the
+        // releases with a matching number of tracks are looked up, like in
+        // foo_musicbrainz
+        json_t *ids = mb_filtered_release_ids (json_object_get (json_root, "releases"), numtracks);
         json_decref (json_root);
         mb_lookup_release_ids (result, ids, numtracks, abort);
         json_decref (ids);
@@ -1135,8 +1237,54 @@ mb_samples_per_sector (DB_playItem_t **tracks, int numtracks) {
     return samplerate == 48000 ? 640 : 588;
 }
 
+// 1 if the decoder of the track writes lossless audio; unknown decoders are
+// assumed to be lossless, so that a new plugin does not block the feature
+static int
+mb_is_lossless (DB_playItem_t *it) {
+    // the values of the :DECODER metadata are the ids of the decoder plugins
+    static const char *const lossy_decoders[] = {
+        // lossy compression
+        "stdmpg", "stdogg", "ffmpeg", "ffap", "aac", "opus", "musepack", "wma", "dts", "wv",
+        // synthesized / emulated audio, which never comes from a cd
+        "adplug", "stdgme", "in_sc68", "sidplay2", "psf", "stddumb", "wmidi", "vtx", NULL
+    };
+
+    deadbeef->pl_lock ();
+    const char *dec = deadbeef->pl_find_meta (it, ":DECODER");
+    char decoder[100] = "";
+    if (dec) {
+        snprintf (decoder, sizeof (decoder), "%s", dec);
+    }
+    deadbeef->pl_unlock ();
+
+    for (int i = 0; lossy_decoders[i]; i++) {
+        if (!strcmp (lossy_decoders[i], decoder)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 int
 mb_check_toc (DB_playItem_t **tracks, int numtracks) {
+    return mb_samples_per_sector (tracks, numtracks) != 0;
+}
+
+// like mb_check_toc, but with the extra conditions of a TOC submission: only
+// 44100 Hz lossless files are accepted by MusicBrainz
+int
+mb_check_toc_submission (DB_playItem_t **tracks, int numtracks) {
+    if (numtracks < 1 || numtracks > MB_MAX_TRACKS) {
+        return 0;
+    }
+    for (int i = 0; i < numtracks; i++) {
+        deadbeef->pl_lock ();
+        int sr = deadbeef->pl_find_meta_int (tracks[i], ":SAMPLERATE", 0);
+        deadbeef->pl_unlock ();
+        if (sr != 44100 || !mb_is_lossless (tracks[i])) {
+            return 0;
+        }
+    }
     return mb_samples_per_sector (tracks, numtracks) != 0;
 }
 
@@ -1219,16 +1367,26 @@ mb_make_toc_url (DB_playItem_t **tracks, int numtracks) {
         return NULL;
     }
 
-    // "<server>/cdtoc/attach?toc=<cdindex> <num tracks> <offset 0> ... <offset num tracks>"
-    int size = strlen (mb_get_server ()) + 64 + (numtracks + 2) * 11;
+    // the musicbrainz toc submission form expects the cdindex, the number of
+    // tracks, then the lead out offset, then the offset of every track,
+    // separated with '+', and optionally the disc id it calculates from them
+    char *discid = mb_make_discid (tracks, numtracks, NULL);
+    const char *server = mb_get_server ();
+    int size = (int)strlen (server) + (numtracks + 2) * 11 + (discid ? (int)strlen (discid) : 0) + 64;
     char *url = malloc (size);
     if (!url) {
+        free (discid);
         return NULL;
     }
-    int len = snprintf (url, size, "%s/cdtoc/attach?toc=1 %d", mb_get_server (), numtracks);
-    for (int i = 1; i <= numtracks; i++) {
-        len += snprintf (url + len, size - len, " %u", offsets[i]);
+
+    int len = snprintf (url, size, "%s/cdtoc/attach?toc=1+%d+%u", server, numtracks, offsets[0]);
+    for (int i = 1; i <= numtracks && len < size - 1; i++) {
+        len += snprintf (url + len, size - len, "+%u", offsets[i]);
     }
+    if (discid && len < size - 1) {
+        len += snprintf (url + len, size - len, "&tracks=%d&id=%s", numtracks, discid);
+    }
+    free (discid);
     return url;
 }
 
@@ -1280,6 +1438,25 @@ mb_cut_to_year (char *date) {
     *p = 0;
 }
 
+// a release is a various artists release when any of its tracks has an artist
+// which is different from the album artist; this is already decided when the
+// release is parsed, but the values can be corrected in the dialog afterwards,
+// so the tracks which are really applied are checked here as well
+static int
+mb_release_is_various (mb_release_t *release, const mb_track_t **tracks, int numtracks) {
+    if (release->is_various) {
+        return 1;
+    }
+    const char *album_artist = release->artist ? release->artist : "";
+    for (int i = 0; i < numtracks; i++) {
+        const mb_track_t *t = tracks[i];
+        if (t->artist && t->artist[0] && strcmp (t->artist, album_artist)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int
 mb_apply_release (mb_release_t *release, int discnumber, DB_playItem_t **tracks, int numtracks) {
     if (!release || !numtracks) {
@@ -1326,7 +1503,7 @@ mb_apply_release (mb_release_t *release, int discnumber, DB_playItem_t **tracks,
     const int short_date = deadbeef->conf_get_int ("musicbrainz.short_date", 1);
     const int use_original_date = deadbeef->conf_get_int ("musicbrainz.use_original_date", 0);
 
-    const int album_artist = write_album_artist || release->is_various;
+    const int album_artist = write_album_artist || mb_release_is_various (release, ordered, on_disc);
     const char *date = use_original_date && release->original_date ? release->original_date : release->date;
 
     char discnum_str[16];
@@ -1335,12 +1512,14 @@ mb_apply_release (mb_release_t *release, int discnumber, DB_playItem_t **tracks,
     char totaldiscs_str[16];
     char year[32];
 
+    int updated = 0;
     for (int i = 0; i < numtracks; i++) {
         DB_playItem_t *it = tracks[i];
         if (!it) {
             continue;
         }
         const mb_track_t *t = ordered[i];
+        updated++;
 
         if (album_artist) {
             mb_set_meta (it, "album artist", release->artist);
@@ -1361,23 +1540,34 @@ mb_apply_release (mb_release_t *release, int discnumber, DB_playItem_t **tracks,
             mb_set_meta (it, "numdiscs", totaldiscs_str);
             mb_set_meta (it, "discsubtitle", t->disc_title);
         }
+        else {
+            // a single disc release has nothing to clear these to
+            deadbeef->pl_delete_meta (it, "disc");
+            deadbeef->pl_delete_meta (it, "numdiscs");
+            deadbeef->pl_delete_meta (it, "discsubtitle");
+        }
 
+        // a release without a date must not leave the year of the previous tag
+        year[0] = 0;
         if (date && *date) {
             snprintf (year, sizeof (year), "%s", date);
             if (short_date) {
                 mb_cut_to_year (year);
             }
-            mb_set_meta (it, "year", year);
         }
+        mb_set_meta (it, "year", year);
+
+        // the original date is only interesting when it differs from the date,
+        // like in foo_musicbrainz; a stale value from a previous tag must go
+        char orig[32] = "";
         if (!use_original_date && release->original_date && release->date
                 && strcmp (release->original_date, release->date)) {
-            char orig[32];
             snprintf (orig, sizeof (orig), "%s", release->original_date);
             if (short_date) {
                 mb_cut_to_year (orig);
             }
-            mb_set_meta (it, "ORIGINAL_RELEASE_TIME", orig);
         }
+        mb_set_meta (it, "ORIGINAL_RELEASE_TIME", orig);
 
         if (write_album_type) {
             mb_set_meta (it, "MUSICBRAINZ_ALBUMTYPE", release->type);
@@ -1389,6 +1579,9 @@ mb_apply_release (mb_release_t *release, int discnumber, DB_playItem_t **tracks,
             mb_set_meta (it, "RELEASECOUNTRY", release->country);
         }
         if (write_media) {
+            // musicbrainz calls this field MEDIA in vorbis comments, and that
+            // is what foo_musicbrainz writes too, so the name is kept even
+            // though deadbeef maps the id3v2 TMED frame from "MEDIA TYPE"
             mb_set_meta (it, "MEDIA", t->disc_format);
         }
         if (write_label_info) {
@@ -1424,7 +1617,7 @@ mb_apply_release (mb_release_t *release, int discnumber, DB_playItem_t **tracks,
     }
 
     free (ordered);
-    return numtracks;
+    return updated;
 }
 
 #pragma mark - playlist helpers
@@ -1470,6 +1663,12 @@ mb_find_common_artist_album (DB_playItem_t **tracks, int numtracks, char **artis
         return;
     }
 
+    // a value which any of the tracks does not have, or which they don't agree
+    // on, is left empty for the user to fill in, without throwing away the
+    // other value
+    int have_artist = 1;
+    int have_album = 1;
+
     for (int i = 0; i < numtracks; i++) {
         char *cur_artist = mb_get_meta (tracks[i], "album artist");
         if (!cur_artist || !*cur_artist) {
@@ -1482,35 +1681,32 @@ mb_find_common_artist_album (DB_playItem_t **tracks, int numtracks, char **artis
             cur_album = mb_get_meta (tracks[i], "title");
         }
 
-        if (!cur_artist || !*cur_artist || !cur_album || !*cur_album) {
-            free (cur_artist);
-            free (cur_album);
-            free (*artist);
-            free (*album);
-            *artist = NULL;
-            *album = NULL;
-            return;
-        }
-
-        if (!i) {
-            *artist = cur_artist;
-            *album = cur_album;
-        }
-        else {
-            if (strcasecmp (cur_artist, *artist)) {
+        if (have_artist) {
+            if (!cur_artist || !*cur_artist || (*artist && strcasecmp (cur_artist, *artist))) {
+                have_artist = 0;
                 free (*artist);
                 *artist = NULL;
             }
-            if (strcasecmp (cur_album, *album)) {
+            else if (!*artist) {
+                *artist = cur_artist;
+                cur_artist = NULL;
+            }
+        }
+
+        if (have_album) {
+            if (!cur_album || !*cur_album || (*album && strcasecmp (cur_album, *album))) {
+                have_album = 0;
                 free (*album);
                 *album = NULL;
             }
-            free (cur_artist);
-            free (cur_album);
-            if (!*artist || !*album) {
-                return;
+            else if (!*album) {
+                *album = cur_album;
+                cur_album = NULL;
             }
         }
+
+        free (cur_artist);
+        free (cur_album);
     }
 }
 
@@ -1519,8 +1715,22 @@ static const char *album_descriptors[] = {
     "20th Anniversary",
     "25th Anniversary",
     "30th Anniversary",
+    "7\" Vinyl",
+    "12\" Vinyl",
     "Bonus Disc",
     "Bonus Track",
+    "CD1",
+    "CD2",
+    "CD3",
+    "CD4",
+    "CD#1",
+    "CD#2",
+    "CD#3",
+    "CD#4",
+    "CD #1",
+    "CD #2",
+    "CD #3",
+    "CD #4",
     "Deluxe Edition",
     "Digipack",
     "Disc One",
@@ -1577,16 +1787,17 @@ mb_strip_album_edition (const char *album) {
     }
     for (int i = 0; album_descriptors[i]; i++) {
         const char *pos = mb_strrcasestr (out, album_descriptors[i]);
-        if (!pos) {
+        if (!pos || pos == out) {
+            // an album which is nothing but a descriptor keeps its name
             continue;
         }
-        if (pos > out && (pos[-1] == '[' || pos[-1] == '{' || pos[-1] == '(')) {
+        if (pos[-1] == '[' || pos[-1] == '{' || pos[-1] == '(') {
             pos--;
         }
         if (pos > out && pos[-1] == ' ') {
             pos--;
         }
-        if (pos < out + strlen (out)) {
+        if (pos > out) {
             out[pos - out] = 0;
         }
     }

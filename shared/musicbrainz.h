@@ -96,6 +96,11 @@ typedef struct mb_result_s {
 int
 mb_check_toc (DB_playItem_t **tracks, int numtracks);
 
+/// Like mb_check_toc, but with the extra conditions of a TOC submission to
+/// MusicBrainz: all the files must be lossless and 44100 Hz.
+int
+mb_check_toc_submission (DB_playItem_t **tracks, int numtracks);
+
 /// Calculates the MusicBrainz disc ID from the track lengths, or NULL if the
 /// tracks don't look like a CD. The string must be free()d by the caller.
 char *
@@ -139,8 +144,10 @@ mb_apply_release (mb_release_t *release, int discnumber, DB_playItem_t **tracks,
 char *
 mb_find_common_mbid (DB_playItem_t **tracks, int numtracks, const char *key);
 
-/// Finds the artist/album pair common to all the tracks, for the search
-/// dialog. Falls back to the title of a single track. Values must be free()d.
+/// Finds the artist and the album which all the tracks have in common, for the
+/// search dialog. A value which a track does not have, or which the tracks don't
+/// agree on, is left NULL, without affecting the other value. Falls back to the
+/// title of a single track. Values must be free()d.
 void
 mb_find_common_artist_album (DB_playItem_t **tracks, int numtracks, char **artist, char **album);
 
@@ -153,6 +160,12 @@ mb_strip_album_edition (const char *album);
 /// 1 if the string is a MusicBrainz ID.
 int
 mb_is_uuid (const char *id);
+
+/// Returns a copy of the first MusicBrainz ID found in the string, or NULL.
+/// Lets the user paste a https://musicbrainz.org/release/<id> URL.
+/// The string must be free()d by the caller.
+char *
+mb_extract_mbid (const char *text);
 
 /// The configured MusicBrainz server, without the trailing slash.
 /// Do not free.

@@ -132,6 +132,34 @@ TEST(MusicBrainzTests, check_toc_accepts_cd_tracks_and_rejects_others) {
     EXPECT_FALSE (mb_check_toc (odd, 2));
     _free_tracks (odd, 2);
 
+    // submitting a toc to musicbrainz is stricter than making a disc id out of
+    // the tracks: 44100 hz and lossless files only
+    DB_playItem_t *sub[2] = {_make_track (plt, 100, 44100), _make_track (plt, 200, 44100)};
+    EXPECT_TRUE (mb_check_toc_submission (sub, 2));
+
+    deadbeef->pl_replace_meta (sub[0], ":DECODER", "stdmpg");
+    EXPECT_FALSE (mb_check_toc_submission (sub, 2));
+    deadbeef->pl_delete_meta (sub[0], ":DECODER");
+
+    // the decoder of a track is identified by the id of its plugin, so the
+    // lossy decoders have to be listed under their ids, not their names
+    deadbeef->pl_replace_meta (sub[0], ":DECODER", "stdogg");
+    EXPECT_FALSE (mb_check_toc_submission (sub, 2));
+    deadbeef->pl_replace_meta (sub[1], ":DECODER", "wv");
+    EXPECT_FALSE (mb_check_toc_submission (sub, 2));
+    deadbeef->pl_delete_meta (sub[1], ":DECODER");
+
+    // a lossless decoder does not block the submission
+    deadbeef->pl_replace_meta (sub[0], ":DECODER", "stdflac");
+    EXPECT_TRUE (mb_check_toc_submission (sub, 2));
+    deadbeef->pl_delete_meta (sub[0], ":DECODER");
+    _free_tracks (sub, 2);
+
+    DB_playItem_t *sub48[2] = {_make_track (plt, 100, 48000), _make_track (plt, 200, 48000)};
+    EXPECT_TRUE (mb_check_toc (sub48, 2));
+    EXPECT_FALSE (mb_check_toc_submission (sub48, 2));
+    _free_tracks (sub48, 2);
+
     deadbeef->plt_unref ((ddb_playlist_t *)plt);
 }
 
@@ -251,6 +279,40 @@ TEST(MusicBrainzTests, apply_release_writes_the_deadbeef_tag_names) {
     deadbeef->plt_unref ((ddb_playlist_t *)plt);
 }
 
+TEST(MusicBrainzTests, apply_release_clears_the_stale_tags_of_the_previous_release) {
+    playlist_t *plt = plt_alloc ("mbapplystale");
+    DB_playItem_t *tracks[2] = {_make_track (plt, 100, 44100), _make_track (plt, 200, 44100)};
+
+    // a multdisc release leaves disc numbers and a disc subtitle
+    mb_release_t multidisc = _make_release (2);
+    multidisc.totaldiscs = 2;
+    for (int i = 0; i < 2; i++) {
+        multidisc.tracks[i].totaldiscs = 2;
+        _set_str (&multidisc.tracks[i].disc_title, "Disc one");
+    }
+    EXPECT_EQ (2, mb_apply_release (&multidisc, 0, tracks, 2));
+    EXPECT_STREQ ("1", deadbeef->pl_find_meta (tracks[0], "disc"));
+    EXPECT_STREQ ("2", deadbeef->pl_find_meta (tracks[0], "numdiscs"));
+    EXPECT_STREQ ("Disc one", deadbeef->pl_find_meta (tracks[0], "discsubtitle"));
+    EXPECT_STREQ ("1963", deadbeef->pl_find_meta (tracks[0], "year"));
+
+    // a single disc release without a date has to remove all of them again
+    mb_release_t release = _make_release (2);
+    free (release.date);
+    release.date = NULL;
+    EXPECT_EQ (2, mb_apply_release (&release, 0, tracks, 2));
+    EXPECT_TRUE (deadbeef->pl_find_meta (tracks[0], "disc") == NULL);
+    EXPECT_TRUE (deadbeef->pl_find_meta (tracks[0], "numdiscs") == NULL);
+    EXPECT_TRUE (deadbeef->pl_find_meta (tracks[0], "discsubtitle") == NULL);
+    EXPECT_TRUE (deadbeef->pl_find_meta (tracks[0], "year") == NULL);
+    EXPECT_TRUE (deadbeef->pl_find_meta (tracks[0], "ORIGINAL_RELEASE_TIME") == NULL);
+
+    _free_release (&multidisc);
+    _free_release (&release);
+    _free_tracks (tracks, 2);
+    deadbeef->plt_unref ((ddb_playlist_t *)plt);
+}
+
 TEST(MusicBrainzTests, apply_release_writes_album_artist_for_various_artists) {
     playlist_t *plt = plt_alloc ("mbapplyva");
     DB_playItem_t *tracks[2] = {_make_track (plt, 100, 44100), _make_track (plt, 200, 44100)};
@@ -280,6 +342,8 @@ TEST(MusicBrainzTests, apply_release_writes_disc_numbers_of_multidisc_releases) 
         release.tracks[i].totaldiscs = 2;
         release.tracks[i].totaltracks = 2;
         release.tracks[i].discnumber = i < 2 ? 1 : 2;
+        // musicbrainz numbers the tracks of every disc from 1
+        release.tracks[i].tracknumber = i % 2 + 1;
     }
     _set_str (&release.tracks[2].disc_title, "Bonus Tracks");
     _set_str (&release.tracks[3].disc_title, "Bonus Tracks");
@@ -346,6 +410,44 @@ TEST(MusicBrainzTests, strip_album_edition_removes_trailing_descriptors) {
     free (stripped);
 }
 
+TEST(MusicBrainzTests, extract_mbid_finds_the_id_in_a_pasted_url) {
+    char *mbid = mb_extract_mbid ("8f84da0e-9997-49a2-8f04-4b216a51f5b5");
+    EXPECT_STREQ ("8f84da0e-9997-49a2-8f04-4b216a51f5b5", mbid);
+    free (mbid);
+
+    // the address of the release page, copied from a browser
+    mbid = mb_extract_mbid ("https://musicbrainz.org/release/8f84da0e-9997-49a2-8f04-4b216a51f5b5#work");
+    EXPECT_STREQ ("8f84da0e-9997-49a2-8f04-4b216a51f5b5", mbid);
+    free (mbid);
+
+    EXPECT_TRUE (mb_extract_mbid ("please please me") == NULL);
+    EXPECT_TRUE (mb_extract_mbid ("8f84da0e-9997-49a2-8f04-4b216a51f5b") == NULL);
+    EXPECT_TRUE (mb_extract_mbid ("") == NULL);
+    EXPECT_TRUE (mb_extract_mbid (NULL) == NULL);
+}
+
+TEST(MusicBrainzTests, make_toc_url_puts_the_lead_out_first) {
+    // the cd from https://musicbrainz.org/doc/Disc_ID_Calculation, whose lead
+    // out is at sector 95462 and whose tracks start at 150, 15363, 32314,
+    // 46592, 63414 and 80489
+    playlist_t *plt = plt_alloc ("mbtocurl");
+    const int sectors[6] = {15213, 16951, 14278, 16822, 17075, 14973};
+    DB_playItem_t *tracks[6];
+    for (int i = 0; i < 6; i++) {
+        tracks[i] = _make_track (plt, sectors[i], 44100);
+    }
+
+    char *url = mb_make_toc_url (tracks, 6);
+    ASSERT_TRUE (url != NULL);
+    EXPECT_TRUE (strstr (url, "cdtoc/attach?toc=1+6+95462+150+15363+32314+46592+63414+80489") != NULL);
+    // the disc id the toc calculates to, which the submission form also takes
+    EXPECT_TRUE (strstr (url, "&tracks=6&id=49HHV7Eb8UKF3aQiNmu1GR8vKTY-") != NULL);
+    free (url);
+
+    _free_tracks (tracks, 6);
+    deadbeef->plt_unref ((ddb_playlist_t *)plt);
+}
+
 TEST(MusicBrainzTests, find_common_mbid_requires_the_same_id_in_every_track) {
     playlist_t *plt = plt_alloc ("mbfindmbid");
     DB_playItem_t *tracks[2] = {_make_track (plt, 100, 44100), _make_track (plt, 200, 44100)};
@@ -390,11 +492,22 @@ TEST(MusicBrainzTests, find_common_artist_album_uses_the_selection_tags) {
     free (artist);
     free (album);
 
-    // different albums have nothing in common
+    // different albums still have the artist in common
     deadbeef->pl_replace_meta (tracks[1], "album", "With The Beatles");
     mb_find_common_artist_album (tracks, 2, &artist, &album);
-    EXPECT_TRUE (artist == NULL);
+    EXPECT_STREQ ("The Beatles", artist);
     EXPECT_TRUE (album == NULL);
+    free (artist);
+
+    // an untagged track only gives up its own values, not the ones the other
+    // tracks agree on
+    deadbeef->pl_replace_meta (tracks[1], "album", "Please Please Me");
+    deadbeef->pl_delete_meta (tracks[1], "album artist");
+    deadbeef->pl_delete_meta (tracks[1], "artist");
+    mb_find_common_artist_album (tracks, 2, &artist, &album);
+    EXPECT_TRUE (artist == NULL);
+    EXPECT_STREQ ("Please Please Me", album);
+    free (album);
 
     _free_tracks (tracks, 2);
     deadbeef->plt_unref ((ddb_playlist_t *)plt);
